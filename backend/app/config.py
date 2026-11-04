@@ -13,7 +13,12 @@ class Settings(BaseSettings):
     max_pdf_pages: int = 200
     ocr_languages: str = "eng+hin+mar"
     paddle_comparison_language: Literal["en", "hi", "mr"] = "en"
-    ocr_dpi: int = 250
+    # "auto" uses CUDA whenever the installed OCR runtime and hardware support it,
+    # and otherwise keeps the ingestion service available on CPU.
+    ocr_device: Literal["auto", "cpu", "gpu"] = "auto"
+    ocr_dpi: int = 180
+    ocr_secondary_verification: bool = False
+    ocr_retry_rotated_pages: bool = False
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

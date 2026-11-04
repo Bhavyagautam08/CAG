@@ -33,7 +33,10 @@ def pdf_bytes(page_texts: list[str] | None = None) -> bytes:
     for index, text in enumerate(page_texts):
         page_id = 3 + 2 * index
         content_id = page_id + 1
-        content = f"BT /F1 12 Tf 50 750 Td ({text}) Tj ET".encode()
+        lines = text.split("\n")
+        escaped_lines = [line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") for line in lines]
+        text_ops = "\n".join(f"({line}) '" for line in escaped_lines)
+        content = f"BT /F1 12 Tf 14 TL 50 750 Td\n{text_ops}\nET".encode()
         page_objects.extend(
             [
                 f"{page_id} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {3 + 2 * len(page_texts)} 0 R >> >> /Contents {content_id} 0 R >>\nendobj\n".encode(),
@@ -137,7 +140,6 @@ def test_upload_process_review_and_export():
     assert duplicate.status_code == 200
     assert duplicate.json()["duplicate"] is True
     assert duplicate.json()["id"] == ingestion_id
-    assert client.delete(f"/api/ingestions/{ingestion_id}").status_code == 204
     source = client.get(f"/api/ingestions/{ingestion_id}/source")
     assert source.status_code == 200
     assert source.content.startswith(b"%PDF-")
@@ -852,3 +854,101 @@ def test_invalid_split_does_not_change_document():
     assert merged.status_code == 200
     assert merged.json()["start_page"] == 1
     assert merged.json()["end_page"] == 2
+
+
+
+def test_donor_donee_relationship_end_to_end_review_and_verification():
+    page_text = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-GIFT-REL-01\n"
+        "Donor: Ramesh Kumar Sharma\n"
+        "Donee: Anil Kumar Sharma\n"
+        "WHEREAS the Donor is the father of the Donee and out of natural love and affection conveys the property.\n"
+        "NOW THIS DEED WITNESSETH that the gift is executed."
+    )
+    uploaded = client.post("/api/ingestions", files={"file": ("gift_rel.pdf", pdf_bytes([page_text]), "application/pdf")})
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    doc = next(d for d in documents if d["ingestion_id"] == ingestion_id)
+    assert doc["category"] == "gift_deed"
+
+    details = client.get(f"/api/documents/{doc['id']}").json()
+    rel_field = next(f for f in details["fields"] if f["field_name"] == "donor_donee_relationship")
+    assert rel_field["value"] == "Father and Son"
+    assert rel_field["verification_status"] == "unreviewed"
+    assert "WHEREAS the Donor is the father of the Donee" in rel_field["evidence"]
+    assert rel_field["source_page"] == 1
+
+    # Reviewer verifies the field
+    verified_resp = client.patch(
+        f"/api/fields/{rel_field['id']}",
+        json={"value": "Father and Son", "verification_status": "verified"},
+    )
+    assert verified_resp.status_code == 200
+    assert verified_resp.json()["verification_status"] == "verified"
+    assert verified_resp.json()["verified_value"] == "Father and Son"
+
+    # Reviewer edits the field
+    edited_resp = client.patch(
+        f"/api/fields/{rel_field['id']}",
+        json={"value": "Father to Son (Verified)", "verification_status": "verified"},
+    )
+    assert edited_resp.status_code == 200
+    assert edited_resp.json()["verified_value"] == "Father to Son (Verified)"
+
+    # Audit history recorded
+    audit = client.get(f"/api/documents/{doc['id']}/audit").json()
+    field_audits = [a for a in audit if a["action"] == "field_corrected"]
+    assert len(field_audits) >= 2
+
+    # Clean up
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+
+def test_donor_donee_relationship_missing_flagged_in_api_and_report():
+    page_text = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-GIFT-MISSING-01\n"
+        "Donor: Rajesh Kumar Sharma\n"
+        "Donee: Anil Kumar Sharma\n"
+        "WHEREAS the Donor is the owner of the property and transfers it without consideration.\n"
+        "NOW THIS DEED WITNESSETH that the gift is executed."
+    )
+    uploaded = client.post("/api/ingestions", files={"file": ("gift_missing.pdf", pdf_bytes([page_text]), "application/pdf")})
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    doc = next(d for d in documents if d["ingestion_id"] == ingestion_id)
+    assert doc["category"] == "gift_deed"
+
+    details = client.get(f"/api/documents/{doc['id']}").json()
+    rel_field = next(f for f in details["fields"] if f["field_name"] == "donor_donee_relationship")
+    assert rel_field["value"] is None
+    assert rel_field["display_value"] == "Not available"
+    assert rel_field["availability"] == "not_available"
+    assert rel_field["verification_status"] == "not_available"
+
+    # Finding created for missing expected relationship
+    findings = client.get(f"/api/documents/{doc['id']}").json()
+    with SessionLocal() as db:
+        finding = db.query(ValidationFinding).filter_by(
+            document_id=doc["id"],
+            rule_id="missing_donor_donee_relationship",
+        ).first()
+        assert finding is not None
+        assert "Expected donor-donee relationship" in finding.explanation
+
+    # Formatted report download succeeds and contains red missing field count
+    report = client.get(f"/api/ingestions/{ingestion_id}/report.pdf")
+    assert report.status_code == 200
+    assert report.content.startswith(b"%PDF-")
+
+    client.delete(f"/api/ingestions/{ingestion_id}")

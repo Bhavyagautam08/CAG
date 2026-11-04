@@ -170,6 +170,7 @@ def test_run_ocr_uses_both_engines_and_records_agreement(monkeypatch, tmp_path: 
     selected_languages = []
     reported_stages = []
     monkeypatch.setattr(ocr_module, "_configured_languages", lambda: ("en", "mr"))
+    monkeypatch.setattr(ocr_module, "_secondary_ocr_enabled", lambda: True)
     monkeypatch.setattr(
         ocr_module,
         "_paddle_reader",
@@ -210,6 +211,7 @@ def test_run_ocr_skips_full_easyocr_on_dense_high_confidence_page(monkeypatch, t
             }]
 
     monkeypatch.setattr(ocr_module, "_configured_languages", lambda: ("en",))
+    monkeypatch.setattr(ocr_module, "_secondary_ocr_enabled", lambda: True)
     monkeypatch.setattr(ocr_module, "_paddle_reader", lambda _language: FakePaddleReader())
     monkeypatch.setattr(
         ocr_module,
@@ -252,6 +254,7 @@ def test_run_ocr_targets_easyocr_to_uncertain_paddle_lines(monkeypatch, tmp_path
     image_path = tmp_path / "scan.png"
     Image.new("RGB", (240, 50), "white").save(image_path)
     monkeypatch.setattr(ocr_module, "_configured_languages", lambda: ("en",))
+    monkeypatch.setattr(ocr_module, "_secondary_ocr_enabled", lambda: True)
     monkeypatch.setattr(ocr_module, "_paddle_reader", lambda _language: FakePaddleReader())
     monkeypatch.setattr(ocr_module, "_easy_reader", lambda _languages: FakeEasyReader())
 
@@ -582,3 +585,120 @@ def test_ocr_reports_unsupported_page_when_no_render_or_embedded_image_exists(tm
     assert confidence is None
     assert word_boxes is None
     assert image_paths is None
+
+
+
+def test_donor_donee_relationship_english_recital_extraction():
+    document = LogicalDocument(id="doc-gift-en", ingestion_id="ing-1", category="gift_deed", start_page=1, end_page=1)
+    page = Page(
+        id="page-gift-en",
+        ingestion_id="ing-1",
+        page_number=1,
+        digital_text=(
+            "DEED OF GIFT\n"
+            "Donor: Ramesh Kumar Sharma\n"
+            "Donee: Anil Kumar Sharma\n"
+            "WHEREAS the Donor is the father of the Donee and out of natural love and affection desires to gift the property.\n"
+            "NOW THIS DEED WITNESSETH that the Donor hereby conveys the schedule premises."
+        ),
+    )
+    fields = {f.field_name: f for f in extract_fields(document, [page])}
+    assert "donor_donee_relationship" in fields
+    rel_field = fields["donor_donee_relationship"]
+    assert rel_field.extracted_value == "Father and Son"
+    assert rel_field.normalized_value == "father and son"
+    assert rel_field.source_page == 1
+    assert "WHEREAS the Donor is the father of the Donee and out of natural love and affection" in rel_field.evidence
+    assert rel_field.verification_status == "unreviewed"
+    assert rel_field.extraction_method == "recital_rule"
+
+
+def test_donor_donee_relationship_hindi_recital_extraction():
+    document = LogicalDocument(id="doc-gift-hi", ingestion_id="ing-1", category="gift_deed", start_page=2, end_page=2)
+    page = Page(
+        id="page-gift-hi",
+        ingestion_id="ing-1",
+        page_number=2,
+        digital_text=(
+            "दानपत्र\n"
+            "दाता / Donor: राम कुमार\n"
+            "प्राप्तकर्ता / Donee: श्याम कुमार\n"
+            "चूंकि दाता और प्राप्तकर्ता के बीच पिता और पुत्र का संबंध है और स्वाभाविक प्रेम व स्नेह के कारण यह दानपत्र निष्पादित किया जा रहा है।"
+        ),
+    )
+    fields = {f.field_name: f for f in extract_fields(document, [page])}
+    assert "donor_donee_relationship" in fields
+    rel_field = fields["donor_donee_relationship"]
+    assert rel_field.extracted_value == "पिता और पुत्र"
+    assert rel_field.normalized_value == "father and son"
+    assert rel_field.source_page == 2
+    assert "चूंकि दाता और प्राप्तकर्ता के बीच पिता और पुत्र का संबंध है" in rel_field.evidence
+    assert rel_field.verification_status == "unreviewed"
+
+
+def test_donor_donee_relationship_marathi_recital_extraction():
+    document = LogicalDocument(id="doc-gift-mr", ingestion_id="ing-1", category="gift_deed", start_page=1, end_page=1)
+    page = Page(
+        id="page-gift-mr",
+        ingestion_id="ing-1",
+        page_number=1,
+        digital_text=(
+            "बक्षीसपत्र\n"
+            "देणार: विजय दत्तात्रय पाटील\n"
+            "घेणार: संजय दत्तात्रय पाटील\n"
+            "देणार व घेणार हे सख्खे बंधू असून त्यांच्यात नैसर्गिक प्रेम व जिव्हाळा आहे."
+        ),
+    )
+    fields = {f.field_name: f for f in extract_fields(document, [page])}
+    assert "donor_donee_relationship" in fields
+    rel_field = fields["donor_donee_relationship"]
+    assert rel_field.extracted_value == "सख्खे बंधू"
+    assert rel_field.normalized_value == "brothers"
+    assert rel_field.source_page == 1
+    assert "देणार व घेणार हे सख्खे बंधू असून" in rel_field.evidence
+    assert rel_field.verification_status == "unreviewed"
+
+
+def test_donor_donee_relationship_shared_surname_not_inferred():
+    # Important requirement: system must NOT infer a relationship merely because donor and donee share a surname
+    document = LogicalDocument(id="doc-gift-surname", ingestion_id="ing-1", category="gift_deed", start_page=1, end_page=1)
+    page = Page(
+        id="page-gift-surname",
+        ingestion_id="ing-1",
+        page_number=1,
+        digital_text=(
+            "GIFT DEED\n"
+            "Donor: Rajesh Kumar Sharma\n"
+            "Donee: Anil Kumar Sharma\n"
+            "WHEREAS the Donor is the sole and absolute owner of Flat 101.\n"
+            "AND WHEREAS the Donor desires to convey the property to the Donee without monetary consideration."
+        ),
+    )
+    fields = {f.field_name: f for f in extract_fields(document, [page])}
+    assert "donor_donee_relationship" in fields
+    rel_field = fields["donor_donee_relationship"]
+    assert rel_field.extracted_value is None
+    assert rel_field.verification_status == "not_available"
+    assert "No explicit donor-donee relationship found" in rel_field.evidence
+
+
+def test_donor_donee_relationship_ambiguous_recital_flagged():
+    # Vague relationship terms in recital flagged as ambiguous
+    document = LogicalDocument(id="doc-gift-amb", ingestion_id="ing-1", category="gift_deed", start_page=1, end_page=1)
+    page = Page(
+        id="page-gift-amb",
+        ingestion_id="ing-1",
+        page_number=1,
+        digital_text=(
+            "GIFT DEED\n"
+            "Donor: Rajesh Kumar Sharma\n"
+            "Donee: Anil Kumar Sharma\n"
+            "WHEREAS the Donor and Donee are near relatives and out of natural love and affection execute this deed."
+        ),
+    )
+    fields = {f.field_name: f for f in extract_fields(document, [page])}
+    assert "donor_donee_relationship" in fields
+    rel_field = fields["donor_donee_relationship"]
+    assert rel_field.extraction_method == "ambiguous_recital"
+    assert rel_field.verification_status == "unreviewed"
+    assert rel_field.extracted_value == "Near Relatives"

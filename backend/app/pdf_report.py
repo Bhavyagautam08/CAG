@@ -99,6 +99,8 @@ def _wrap(text: str, font_name: str, font_size: float, max_width: float) -> list
 
 
 def _humanize(value: str) -> str:
+    if value == "donor_donee_relationship":
+        return "Donor-Donee Relationship"
     return re.sub(r"\s+", " ", value.replace("_", " ")).strip().title()
 
 
@@ -662,7 +664,17 @@ def build_ingestion_report(db: Session, ingestion_id: str) -> bytes:
         for page_number in range(document.start_page, document.end_page + 1):
             categories_by_page[page_number] = document.category
         for field in document.fields:
-            fields_by_page.setdefault(field.source_page, []).append(field)
+            if field.source_page and 1 <= field.source_page <= source_page_count:
+                target_page = field.source_page
+            else:
+                target_page = document.start_page
+            if field not in fields_by_page.setdefault(target_page, []):
+                fields_by_page[target_page].append(field)
+            if field.field_name == "donor_donee_relationship":
+                for doc_page in range(document.start_page, document.end_page + 1):
+                    if doc_page != target_page:
+                        if field not in fields_by_page.setdefault(doc_page, []):
+                            fields_by_page[doc_page].append(field)
 
     font_name = _register_unicode_font()
     overlay_bytes = io.BytesIO()

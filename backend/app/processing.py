@@ -34,7 +34,13 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 CATEGORIES = {
-    "gift_deed": ("gift deed", "दानपत्र"),
+    "gift_deed": (
+        "gift deed", "दानपत्र", "बक्षीसपत्र", "bakshispatra",
+        "indenture of gift", "deed of gift", "gift of property",
+        "the donor", "the donee", "executing donor", "claiming donee",
+        "donors", "donees", "दानकर्ता", "दानग्रहीता",
+        "irrevocably gift", "doth hereby gift",
+    ),
     "valuation": ("mulyankan", "मूल्यांकन", "valuation", "assessment"),
     "receipt": ("processing charges", "handling charges", "receipt", "पावती"),
     "identity_document": ("aadhaar", "आधार", "unique identification", "identity document", "identity verification record", "पहचान विवरण"),
@@ -147,6 +153,310 @@ INVOICE_FIELD_LABELS: dict[str, tuple[tuple[str, ...], int]] = {
     "terms_and_conditions": (("terms & conditions of sale", "terms and conditions of sale"), 0),
     "authorized_signatory": (("authorized signatory", "authorised signatory"), 0),
 }
+
+
+DONOR_DONEE_RELATIONSHIP_TERMS: dict[str, tuple[str, str]] = {
+    # English
+    "parents to son": ("Parents to Son", "parents and son"),
+    "parents and son": ("Parents to Son", "parents and son"),
+    "parents-son": ("Parents to Son", "parents and son"),
+    "parent to son": ("Parent and Son", "parent and son"),
+    "parent and son": ("Parent and Son", "parent and son"),
+    "parents to daughter": ("Parents to Daughter", "parents and daughter"),
+    "parents and daughter": ("Parents to Daughter", "parents and daughter"),
+    "parents-daughter": ("Parents to Daughter", "parents and daughter"),
+    "parent to daughter": ("Parent and Daughter", "parent and daughter"),
+    "parent and daughter": ("Parent and Daughter", "parent and daughter"),
+    "parents to children": ("Parents and Children", "parents and children"),
+    "parents and children": ("Parents and Children", "parents and children"),
+    "father to son": ("Father and Son", "father and son"),
+    "father to daughter": ("Father and Daughter", "father and daughter"),
+    "mother to son": ("Mother and Son", "mother and son"),
+    "mother to daughter": ("Mother and Daughter", "mother and daughter"),
+    "brother to brother": ("Brothers", "brothers"),
+    "brother to sister": ("Brother and Sister", "brother and sister"),
+    "sister to brother": ("Brother and Sister", "brother and sister"),
+    "sister to sister": ("Sisters", "sisters"),
+    "uncle to nephew": ("Uncle and Nephew", "uncle and nephew"),
+    "uncle to niece": ("Uncle and Niece", "uncle and niece"),
+    "paternal uncle to nephew": ("Paternal Uncle and Nephew", "uncle and nephew"),
+    "paternal aunt to nephew": ("Paternal Aunt and Nephew", "aunt and nephew"),
+    "husband to wife": ("Husband and Wife", "husband and wife"),
+    "wife to husband": ("Husband and Wife", "husband and wife"),
+    "parents": ("Parents and Children", "parents and children"),
+    "parent": ("Parent and Child", "parent and child"),
+    "father and son": ("Father and Son", "father and son"),
+    "father and daughter": ("Father and Daughter", "father and daughter"),
+    "mother and son": ("Mother and Son", "mother and son"),
+    "mother and daughter": ("Mother and Daughter", "mother and daughter"),
+    "brother and sister": ("Brother and Sister", "brother and sister"),
+    "brothers": ("Brothers", "brothers"),
+    "brother and brother": ("Brothers", "brothers"),
+    "sisters": ("Sisters", "sisters"),
+    "sister and sister": ("Sisters", "sisters"),
+    "husband and wife": ("Husband and Wife", "husband and wife"),
+    "father-son": ("Father and Son", "father and son"),
+    "father-daughter": ("Father and Daughter", "father and daughter"),
+    "mother-son": ("Mother and Son", "mother and son"),
+    "mother-daughter": ("Mother and Daughter", "mother and daughter"),
+    "brother-sister": ("Brother and Sister", "brother and sister"),
+    "husband-wife": ("Husband and Wife", "husband and wife"),
+    "father": ("Father and Son", "father and son"),
+    "mother": ("Mother and Son", "mother and son"),
+    "son": ("Father and Son", "father and son"),
+    "daughter": ("Father and Daughter", "father and daughter"),
+    "brother": ("Brothers", "brothers"),
+    "sister": ("Brother and Sister", "brother and sister"),
+    "husband": ("Husband and Wife", "husband and wife"),
+    "wife": ("Husband and Wife", "husband and wife"),
+    "grandfather and grandson": ("Grandfather and Grandson", "grandfather and grandson"),
+    "grandfather and granddaughter": ("Grandfather and Granddaughter", "grandfather and granddaughter"),
+    "grandmother and grandson": ("Grandmother and Grandson", "grandmother and grandson"),
+    "grandson": ("Grandfather and Grandson", "grandfather and grandson"),
+    "granddaughter": ("Grandfather and Granddaughter", "grandfather and granddaughter"),
+    "nephew": ("Uncle and Nephew", "uncle and nephew"),
+    "niece": ("Uncle and Niece", "uncle and niece"),
+    "uncle": ("Uncle and Nephew", "uncle and nephew"),
+    "aunt": ("Aunt and Nephew", "aunt and nephew"),
+    "daughter-in-law": ("Parent-in-law and Daughter-in-law", "daughter-in-law"),
+    "son-in-law": ("Parent-in-law and Son-in-law", "son-in-law"),
+
+    # Hindi
+    "माता-पिता और पुत्र": ("माता-पिता और पुत्र", "parents and son"),
+    "माता-पिता से पुत्र": ("माता-पिता और पुत्र", "parents and son"),
+    "माता-पिता व पुत्र": ("माता-पिता और पुत्र", "parents and son"),
+    "माता-पिता और पुत्री": ("माता-पिता और पुत्री", "parents and daughter"),
+    "माता-पिता से पुत्री": ("माता-पिता और पुत्री", "parents and daughter"),
+    "माता-पिता व पुत्री": ("माता-पिता और पुत्री", "parents and daughter"),
+    "पिता से पुत्र": ("पिता और पुत्र", "father and son"),
+    "माता से पुत्र": ("माता और पुत्र", "mother and son"),
+    "पिता से पुत्री": ("पिता और पुत्री", "father and daughter"),
+    "माता से पुत्री": ("माता और पुत्री", "mother and daughter"),
+    "माता-पिता": ("माता-पिता और संतान", "parents and children"),
+    "पिता और पुत्र": ("पिता और पुत्र", "father and son"),
+    "पिता-पुत्र": ("पिता और पुत्र", "father and son"),
+    "पिता व पुत्र": ("पिता और पुत्र", "father and son"),
+    "पिता और पुत्री": ("पिता और पुत्री", "father and daughter"),
+    "पिता-पुत्री": ("पिता और पुत्री", "father and daughter"),
+    "पिता व पुत्री": ("पिता और पुत्री", "father and daughter"),
+    "माता और पुत्र": ("माता और पुत्र", "mother and son"),
+    "माता-पुत्र": ("माता और पुत्र", "mother and son"),
+    "माता और पुत्री": ("माता और पुत्री", "mother and daughter"),
+    "माता-पुत्री": ("माता और पुत्री", "mother and daughter"),
+    "भाई और बहन": ("भाई और बहन", "brother and sister"),
+    "भाई-बहन": ("भाई और बहन", "brother and sister"),
+    "सगे भाई": ("सगे भाई", "brothers"),
+    "पति और पत्नी": ("पति और पत्नी", "husband and wife"),
+    "पति-पत्नी": ("पति और पत्नी", "husband and wife"),
+    "पिता": ("पिता और पुत्र", "father and son"),
+    "माता": ("माता और पुत्र", "mother and son"),
+    "पुत्र": ("पिता और पुत्र", "father and son"),
+    "बेटा": ("पिता और पुत्र", "father and son"),
+    "सुपुत्र": ("पिता और पुत्र", "father and son"),
+    "पुत्री": ("पिता और पुत्री", "father and daughter"),
+    "बेटी": ("पिता और पुत्री", "father and daughter"),
+    "सुपुत्री": ("पिता और पुत्री", "father and daughter"),
+    "भाई": ("सगे भाई", "brothers"),
+    "बहन": ("भाई और बहन", "brother and sister"),
+    "पत्नी": ("पति और पत्नी", "husband and wife"),
+    "पति": ("पति और पत्नी", "husband and wife"),
+    "दादा": ("दादा और पोता", "grandfather and grandson"),
+    "पोता": ("दादा और पोता", "grandfather and grandson"),
+    "पोती": ("दादा और पोती", "grandfather and granddaughter"),
+    "भतीजा": ("चाचा और भतीजा", "uncle and nephew"),
+    "बहू": ("ससुर और बहू", "daughter-in-law"),
+
+    # Marathi
+    "आई-वडील आणि मुलगा": ("आई-वडील आणि मुलगा", "parents and son"),
+    "आई-वडील व मुलगा": ("आई-वडील आणि मुलगा", "parents and son"),
+    "आई-वडील ते मुलगा": ("आई-वडील आणि मुलगा", "parents and son"),
+    "आई-वडील आणि मुलगी": ("आई-वडील आणि मुलगी", "parents and daughter"),
+    "आई-वडील व मुलगी": ("आई-वडील आणि मुलगी", "parents and daughter"),
+    "आई-वडील ते मुलगी": ("आई-वडील आणि मुलगी", "parents and daughter"),
+    "वडील ते मुलगा": ("वडील आणि मुलगा", "father and son"),
+    "आई ते मुलगा": ("आई आणि मुलगा", "mother and son"),
+    "वडील ते मुलगी": ("वडील आणि मुलगी", "father and daughter"),
+    "आई ते मुलगी": ("आई आणि मुलगी", "mother and daughter"),
+    "आई-वडील": ("आई-वडील आणि मुले", "parents and children"),
+    "वडील आणि मुलगा": ("वडील आणि मुलगा", "father and son"),
+    "वडील व मुलगा": ("वडील आणि मुलगा", "father and son"),
+    "वडील-मुलगा": ("वडील आणि मुलगा", "father and son"),
+    "वडील आणि मुलगी": ("वडील आणि मुलगी", "father and daughter"),
+    "वडील व मुलगी": ("वडील आणि मुलगी", "father and daughter"),
+    "वडील-मुलगी": ("वडील आणि मुलगी", "father and daughter"),
+    "आई आणि मुलगा": ("आई आणि मुलगा", "mother and son"),
+    "आई व मुलगा": ("आई आणि मुलगा", "mother and son"),
+    "आई-मुलगा": ("आई आणि मुलगा", "mother and son"),
+    "आई आणि मुलगी": ("आई आणि मुलगी", "mother and daughter"),
+    "आई व मुलगी": ("आई आणि मुलगी", "mother and daughter"),
+    "आई-मुलगी": ("आई आणि मुलगी", "mother and daughter"),
+    "भाऊ आणि बहीण": ("भाऊ आणि बहीण", "brother and sister"),
+    "भाऊ-बहीण": ("भाऊ आणि बहीण", "brother and sister"),
+    "सख्खे बंधू": ("सख्खे बंधू", "brothers"),
+    "पती आणि पत्नी": ("पती आणि पत्नी", "husband and wife"),
+    "पती-पत्नी": ("पती आणि पत्नी", "husband and wife"),
+    "वडील": ("वडील आणि मुलगा", "father and son"),
+    "आई": ("आई आणि मुलगा", "mother and son"),
+    "मुलगा": ("वडील आणि मुलगा", "father and son"),
+    "चिरंजीव": ("वडील आणि मुलगा", "father and son"),
+    "मुलगी": ("वडील आणि मुलगी", "father and daughter"),
+    "कन्या": ("वडील आणि मुलगी", "father and daughter"),
+    "सुकन्या": ("वडील आणि मुलगी", "father and daughter"),
+    "भाऊ": ("सख्खे बंधू", "brothers"),
+    "बंधू": ("सख्खे बंधू", "brothers"),
+    "बहीण": ("भाऊ आणि बहीण", "brother and sister"),
+    "पत्नी": ("पती आणि पत्नी", "husband and wife"),
+    "पती": ("पती आणि पत्नी", "husband and wife"),
+    "आजोबा": ("आजोबा आणि नातू", "grandfather and grandson"),
+    "नातू": ("आजोबा आणि नातू", "grandfather and grandson"),
+    "नात": ("आजोबा आणि नात", "grandfather and granddaughter"),
+    "पुतण्या": ("काका आणि पुतण्या", "uncle and nephew"),
+    "सून": ("सासरा आणि सून", "daughter-in-law"),
+}
+
+DONOR_DONEE_EXPLICIT_PATTERNS = [
+    # Explicit header / field label pattern (e.g. "RELATIONSHIP: Parents to Son" or "RELATION: Father and Son")
+    r"\b(?:relationship|relation|related\s+as)\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*[:：is-]*\s*([a-zA-Z\s/-]+?)(?=\s*(?:[;.\n]|\bwhereas\b|\band\b|\bnow\b|$))",
+    # Hindi explicit label
+    r"(?:संबंध|रिश्ता|नाता|नातेसंबंध)\s*[:：-]\s*([\u0900-\u097F\s/-]+?)(?=\s*(?:[;।\n]|$))",
+    # Marathi explicit label
+    r"(?:नातेसंबंध|नाते|संबंध)\s*[:：-]\s*([\u0900-\u097F\s/-]+?)(?=\s*(?:[;।\n]|$))",
+
+    # Mutual / explicit relationship phrase (English)
+    r"\b(?:related\s+as|relationship\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*[:：is]*)\s*(father\s+and\s+son|father\s+and\s+daughter|mother\s+and\s+son|mother\s+and\s+daughter|brother\s+and\s+sister|brothers|sisters|husband\s+and\s+wife|father-son|father-daughter|mother-son|mother-daughter|brother-sister|husband-wife)\b",
+    r"\b(?:parties\s+(?:hereto\s+)?(?:are\s+)?(?:related\s+as\s+)?|are\s+)(brothers|sisters|husband\s+and\s+wife|father\s+and\s+son)\b",
+    r"\b(?:the\s+)?donor\s+(?:is|being)\s+(?:the\s+)?(father|mother|brother|sister|husband|wife|grandfather|grandmother|uncle|aunt)\s+of\s+(?:the\s+)?(?:donee|recipient)\b",
+    r"\b(?:the\s+)?donee\s+(?:is|being)\s+(?:the\s+)?(son|daughter|brother|sister|wife|husband|grandson|granddaughter|nephew|niece)\s+of\s+(?:the\s+)?(?:donor|transferor)\b",
+    r"\bout\s+of\s+(?:natural\s+)?love\s+and\s+affection\s+(?:for|towards)\s+(?:(?:his|her|the\s+donor'?s)\s+)?(son|daughter|brother|sister|wife|husband|mother|father|grandson|granddaughter|nephew|niece)\b",
+    r"\b(?:donor|donee)\s*[:：.-]\s*[^,\n()]+\((father|mother|son|daughter|brother|sister|husband|wife|grandson|granddaughter)\)",
+
+    # Hindi
+    r"(?:दाता|देने\s*वाले?)\s+(?:और|व)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s*(?:के\s+बीच\s+)?\s*(पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
+    r"(?:दाता|देने\s*वाले?)\s+(?:और|व)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s*(?:के\s+बीच\s+)?(?:का\s+)?(?:संबंध|रिश्ता|नाता|नातेसंबंध)\s*[:：-]?\s*(पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
+    r"(?:संबंध|रिश्ता|नाता)\s*[:：-]?\s*(पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
+    r"(?:दाता|देने\s*वाले?)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s+के?\s*(पिता|माता|भाई|बहन|पति|दादा|नाना|चाचा|मामा)\s*(?:हैं?|होने\s*के\s*नाते)",
+    r"(?:प्राप्तकर्ता|लेने\s*वाले?)\s+(?:दाता|देने\s*वाले?)\s+क[ाेी]?\s*(पुत्र|बेटा|पुत्री|बेटी|सुपुत्र|सुपुत्री|भाई|बहन|पत्नी|पति|पोता|पोती|नाती|नातिन)\s*(?:हैं?|होने\s*के\s*नाते)",
+    r"(?:स्वाभाविक|प्राकृतिक)\s+(?:प्रेम\s*(?:और|व)\s*स्नेह|प्रेम|स्नेह)\s*(?:के\s+कारण|वश)\s+(?:अपने|अपनी)\s*(पुत्र|बेटा|पुत्री|बेटी|सुपुत्र|सुपुत्री|भाई|बहन|पत्नी|पति|पोता|पोती)",
+    r"(?:दाता|प्राप्तकर्ता)\s*[:：-]?\s*[^,\n()]+\((पिता|माता|पुत्र|पुत्री|बेटा|बेटी|भाई|बहन|पति|पत्नी)\)",
+
+    # Marathi
+    r"देणार\s*(?:\(दाता\))?\s*(?:व|आणि)\s*घेणार\s*(?:\(स्वीकारणारा\))?\s*(?:यांचे|यांच्यातील|यांच्यात|यांच्या)\s*(?:नाते|नातेसंबंध|संबंध)?\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
+    r"देणार\s*(?:व|आणि)\s*घेणार\s*(?:हे\s+)?(सख्खे\s+बंधू|भाऊ|पती-पत्नी)",
+    r"(?:नातेसंबंध|नाते|संबंध)\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
+    r"देणाराचे\s+घेणाऱ्याशी\s+नाते\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
+    r"देणार[ाी]?\s+(?:हा\s+|ही\s+)?घेणाऱ्याच[ाीे]?\s*(वडील|पिता|आई|माता|भाऊ|बहीण|पती|पत्नी|आजोबा|आजी)\s*(?:आहे|असून|असल्याने)",
+    r"घेणार[ाी]?\s+(?:हा\s+|ही\s+)?देणाऱ्याच[ाीे]?\s*(मुलगा|मुलगी|पुत्र|कन्या|चिरंजीव|सुपुत्र|सुकन्या|भाऊ|बहीण|पत्नी|पती|नातू|नात)\s*(?:आहे|असून|असल्याने)",
+    r"(?:नैसर्गिक|स्वाभाविक)\s+(?:प्रेम\s*(?:व|आणि)\s*जिव्हाळा|प्रेम|जिव्हाळा|लोभ|ममते)(?:पोटी|मुळे|खातर)\s+(?:आपल[ाीे]|त्यांच[ाीे])?\s*(मुलगा|मुलगी|पुत्र|कन्या|चिरंजीव|सुपुत्र|सुकन्या|भाऊ|बहीण|पत्नी|पती|नातू|नात)",
+    r"देणार\s*[:：-]?\s*[^,\n()]+\((वडील|आई|भाऊ|बहीण|पती|पत्नी)\)",
+    r"घेणार\s*[:：-]?\s*[^,\n()]+\((मुलगा|मुलगी|भाऊ|बहीण|पत्नी|पती)\)",
+]
+
+DONOR_DONEE_VAGUE_PATTERNS = [
+    r"\b(?:near\s+relatives?|relatives?|family\s+members?|related)\b",
+    r"(?:नातेवाईक|नातेसंबंधी|कुटुंबातील\s*सदस्य)",
+    r"(?:रिश्तेदार|संबंधी|सगे-संबंधी|परिवार\s*के\s*सदस्य)",
+]
+
+
+def _extract_sentences(text: str) -> list[str]:
+    raw = re.split(r"(?<=[.;।!?\n])\s+", text)
+    sentences: list[str] = []
+    for s in raw:
+        cleaned = re.sub(r"\s+", " ", s).strip()
+        if len(cleaned) >= 5:
+            sentences.append(cleaned)
+    return sentences
+
+
+def extract_donor_donee_relationship(
+    text_by_page: list[tuple[int, str]],
+    donor_name: str | None = None,
+    donee_name: str | None = None,
+) -> tuple[str, str | None, str, int, bool]:
+    """
+    Search recital text for explicit relationship phrases near donor and donee names.
+    Supports English, Hindi, and Marathi phrases.
+    Does not infer relationship merely from shared surnames.
+    Returns: (extracted_value, normalized_value, evidence_sentence, source_page, is_ambiguous)
+    If no explicit relationship is stated, returns extracted_value='not_available'.
+    """
+    default_page = text_by_page[0][0] if text_by_page else 1
+    found_candidates: list[tuple[str, str, str, int, bool]] = []
+
+    d_first = donor_name.split()[0].casefold() if donor_name and len(donor_name.split()) > 1 else None
+    e_first = donee_name.split()[0].casefold() if donee_name and len(donee_name.split()) > 1 else None
+
+    for page_number, page_text in text_by_page:
+        sentences = _extract_sentences(page_text)
+        for sentence in sentences:
+            sentence_cf = sentence.casefold()
+
+            matched_in_sentence = False
+            for pat in DONOR_DONEE_EXPLICIT_PATTERNS:
+                m = re.search(pat, sentence, re.IGNORECASE)
+                if m:
+                    raw_term = m.group(1).strip().casefold()
+                    alt_term = re.sub(r"\s*[/\\-]\s*", " and ", raw_term)
+                    alt_to = re.sub(r"\s+to\s+", " and ", raw_term)
+                    norm_entry = (
+                        DONOR_DONEE_RELATIONSHIP_TERMS.get(raw_term)
+                        or DONOR_DONEE_RELATIONSHIP_TERMS.get(alt_term)
+                        or DONOR_DONEE_RELATIONSHIP_TERMS.get(alt_to)
+                        or next((v for k, v in DONOR_DONEE_RELATIONSHIP_TERMS.items() if k in raw_term), None)
+                    )
+                    if norm_entry:
+                        disp_val, norm_val = norm_entry
+                        found_candidates.append((disp_val, norm_val, sentence, page_number, False))
+                        matched_in_sentence = True
+                        break
+
+            if matched_in_sentence:
+                continue
+
+            # If donor_name and donee_name given, check if sentence mentions both with a relation
+            if d_first and e_first and d_first in sentence_cf and e_first in sentence_cf:
+                name_rel = re.search(
+                    r"\b(father|mother|son|daughter|brother|sister|husband|wife|वडील|आई|मुलगा|मुलगी|भाऊ|बहीण|पिता|माता|पुत्र|पुत्री)\b",
+                    sentence,
+                    re.IGNORECASE,
+                )
+                if name_rel:
+                    raw_term = name_rel.group(1).strip().casefold()
+                    norm_entry = DONOR_DONEE_RELATIONSHIP_TERMS.get(raw_term)
+                    if norm_entry:
+                        disp_val, norm_val = norm_entry
+                        found_candidates.append((disp_val, norm_val, sentence, page_number, False))
+                        continue
+
+            # Check vague terms (only if sentence context mentions donor/donee/parties/gift)
+            if any(term in sentence_cf for term in ["donor", "donee", "parties", "दाता", "प्राप्तकर्ता", "देणार", "घेणार"]):
+                for vpat in DONOR_DONEE_VAGUE_PATTERNS:
+                    vm = re.search(vpat, sentence, re.IGNORECASE)
+                    if vm:
+                        found_candidates.append(("Near Relatives", "near relatives", sentence, page_number, True))
+                        break
+
+    if not found_candidates:
+        return (
+            "not_available",
+            None,
+            "No explicit donor-donee relationship found in recital text; verify the source page.",
+            default_page,
+            False,
+        )
+
+    non_vague = [c for c in found_candidates if not c[4]]
+    if non_vague:
+        norm_values = {c[1] for c in non_vague}
+        if len(norm_values) > 1:
+            all_disp = ", ".join(dict.fromkeys(c[0] for c in non_vague))
+            ev = non_vague[0][2]
+            pg = non_vague[0][3]
+            return (f"Ambiguous: {all_disp}", "ambiguous", ev, pg, True)
+        return non_vague[0]
+
+    return found_candidates[0]
+
 
 _INVOICE_LABELS = tuple(
     dict.fromkeys(
@@ -334,7 +644,7 @@ def _extract_invoice_fields(document: LogicalDocument, text_by_page: list[tuple[
     return found
 
 
-def extract_fields(document: LogicalDocument, pages: list[Page]) -> list[ExtractedField]:
+def extract_fields(document: LogicalDocument, pages: list[Page], all_pages: list[Page] | None = None) -> list[ExtractedField]:
     text_by_page = [(p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "") for p in pages]
     if document.category == "tax_invoice":
         return _extract_invoice_fields(document, text_by_page)
@@ -363,7 +673,7 @@ def extract_fields(document: LogicalDocument, pages: list[Page]) -> list[Extract
     for page_number, text in text_by_page:
         for line in text.splitlines():
             match = re.search(
-                r"(donor\s*/\s*दाता|donee\s*/\s*प्राप्तकर्ता|donor|donee|transferor|recipient|owner|party|श्री|श्रीमती)\s*[:：.-]\s*([\w .'-]{3,100})",
+                r"(donor\s*/\s*दाता|donee\s*/\s*प्राप्तकर्ता|देणार(?:\s*/\s*दाता)?|घेणार(?:\s*/\s*प्राप्तकर्ता)?|donor|donee|दाता|देणार|घेणारा?|प्राप्तकर्ता|transferor|recipient|owner|party|श्री|श्रीमती)\s*[:：.-]\s*([\w .'-]{3,100})",
                 line,
                 re.IGNORECASE,
             )
@@ -373,7 +683,12 @@ def extract_fields(document: LogicalDocument, pages: list[Page]) -> list[Extract
                 if name and not re.search(r"\d{4}", name):
                     field_name = {
                         "donor": "donor_name",
+                        "दाता": "donor_name",
+                        "देणार": "donor_name",
                         "donee": "donee_name",
+                        "प्राप्तकर्ता": "donee_name",
+                        "घेणार": "donee_name",
+                        "घेणारा": "donee_name",
                         "transferor": "transferor_name",
                         "recipient": "recipient_name",
                         "owner": "owner_name",
@@ -401,6 +716,58 @@ def extract_fields(document: LogicalDocument, pages: list[Page]) -> list[Extract
                 verification_status="unreviewed",
             )
         )
+
+    donor_name = next((f.extracted_value for f in found if f.field_name == "donor_name"), None)
+    donee_name = next((f.extracted_value for f in found if f.field_name == "donee_name"), None)
+    has_gift_context = (
+        document.category == "gift_deed"
+        or (donor_name is not None and donee_name is not None)
+        or any(
+            re.search(r"\b(?:gift\s*deed)\b|दानपत्र|बक्षीसपत्र", text, re.IGNORECASE)
+            for _, text in text_by_page
+        )
+    )
+    if has_gift_context:
+        rel_val, rel_norm, rel_ev, rel_page, is_amb = extract_donor_donee_relationship(
+            text_by_page, donor_name=donor_name, donee_name=donee_name
+        )
+        if rel_val == "not_available" and all_pages:
+            all_text_by_page = [
+                (p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "")
+                for p in all_pages
+            ]
+            fallback_val, fallback_norm, fallback_ev, fallback_page, fallback_amb = extract_donor_donee_relationship(
+                all_text_by_page, donor_name=donor_name, donee_name=donee_name
+            )
+            if fallback_val != "not_available":
+                rel_val, rel_norm, rel_ev, rel_page, is_amb = fallback_val, fallback_norm, fallback_ev, fallback_page, fallback_amb
+        if rel_val != "not_available":
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="donor_donee_relationship",
+                    extracted_value=rel_val,
+                    normalized_value=rel_norm,
+                    source_page=rel_page,
+                    evidence=rel_ev,
+                    extraction_method="ambiguous_recital" if is_amb else "recital_rule",
+                    verification_status="unreviewed",
+                )
+            )
+        elif document.category == "gift_deed" or (donor_name and donee_name):
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="donor_donee_relationship",
+                    extracted_value=None,
+                    normalized_value=None,
+                    source_page=rel_page,
+                    evidence=rel_ev,
+                    extraction_method="expected_gift_deed_field",
+                    verification_status="not_available",
+                )
+            )
+
     return found
 
 
@@ -448,7 +815,7 @@ def refresh_ingestion_extraction(db: Session, ingestion_id: str) -> dict[str, in
             if field not in preserved_fields:
                 db.delete(field)
 
-        refreshed = extract_fields(document, document_pages)
+        refreshed = extract_fields(document, document_pages, all_pages=pages)
         for field in refreshed:
             if field.field_name not in preserved_names:
                 db.add(field)
@@ -457,30 +824,62 @@ def refresh_ingestion_extraction(db: Session, ingestion_id: str) -> dict[str, in
         db.execute(
             delete(ValidationFinding).where(
                 ValidationFinding.document_id == document.id,
-                ValidationFinding.rule_id == "missing_invoice_fields",
+                ValidationFinding.rule_id.in_([
+                    "missing_invoice_fields",
+                    "missing_donor_donee_relationship",
+                    "ambiguous_donor_donee_relationship",
+                ]),
             )
         )
-        missing_fields = [
-            field.field_name.replace("_", " ")
-            for field in refreshed
-            if field.verification_status == "not_available"
-        ]
-        if missing_fields:
-            db.add(
-                ValidationFinding(
-                    case_id=document.case_id,
-                    document_id=document.id,
-                    rule_id="missing_invoice_fields",
-                    severity="low",
-                    kind="missing_information",
-                    explanation=(
-                        "Expected tax-invoice values were not found in the OCR text: "
-                        + ", ".join(missing_fields)
-                        + ". Verify each item against the source page."
-                    ),
-                    source_pages=",".join(str(page.page_number) for page in document_pages),
+        if document.category == "tax_invoice":
+            missing_invoice_fields = [
+                field.field_name.replace("_", " ")
+                for field in refreshed
+                if field.verification_status == "not_available"
+            ]
+            if missing_invoice_fields:
+                db.add(
+                    ValidationFinding(
+                        case_id=document.case_id,
+                        document_id=document.id,
+                        rule_id="missing_invoice_fields",
+                        severity="low",
+                        kind="missing_information",
+                        explanation=(
+                            "Expected tax-invoice values were not found in the OCR text: "
+                            + ", ".join(missing_invoice_fields)
+                            + ". Verify each item against the source page."
+                        ),
+                        source_pages=",".join(str(page.page_number) for page in document_pages),
+                    )
                 )
-            )
+        if document.category == "gift_deed":
+            rel_field = next((f for f in refreshed if f.field_name == "donor_donee_relationship"), None)
+            if rel_field and rel_field.verification_status == "not_available":
+                db.add(
+                    ValidationFinding(
+                        case_id=document.case_id,
+                        document_id=document.id,
+                        rule_id="missing_donor_donee_relationship",
+                        severity="low",
+                        kind="missing_information",
+                        explanation="Expected donor-donee relationship was not explicitly stated in the recital text. Verify against the source document.",
+                        source_pages=str(rel_field.source_page),
+                    )
+                )
+            if rel_field and rel_field.extraction_method == "ambiguous_recital":
+                db.add(
+                    ValidationFinding(
+                        case_id=document.case_id,
+                        document_id=document.id,
+                        rule_id="ambiguous_donor_donee_relationship",
+                        severity="medium",
+                        kind="ambiguous_relationship",
+                        explanation=f"The donor-donee relationship in the recital text is ambiguous ({rel_field.extracted_value}). Verify against the source document.",
+                        evidence=rel_field.evidence,
+                        source_pages=str(rel_field.source_page),
+                    )
+                )
         refreshed_documents += 1
 
     return {"documents": refreshed_documents, "fields": refreshed_fields}
@@ -602,7 +1001,7 @@ def _ocr_page(
                 processed_path, page_number, image_index, progress_callback
             )
             errors.extend(engine_errors)
-            if not boxes:
+            if not boxes and get_settings().ocr_retry_rotated_pages:
                 angle = 90 if grayscale.width > grayscale.height else 180
                 rotated = grayscale.rotate(-angle, expand=True)
                 rotated_path = image_dir / f"page-{page_number}-rotated-{angle}-{image_index}.png"
@@ -762,7 +1161,7 @@ def process_ingestion(ingestion_id: str, db_factory) -> None:
         db.flush()
         case_ids: set[str] = set()
         for doc, pages in doc_pages:
-            doc.fields.extend(extract_fields(doc, pages))
+            doc.fields.extend(extract_fields(doc, pages, all_pages=page_results))
             registration = next(
                 (field.normalized_value for field in doc.fields if field.field_name == "registration_number"),
                 None,
@@ -784,27 +1183,55 @@ def process_ingestion(ingestion_id: str, db_factory) -> None:
                 doc.case_link_status = "insufficient_evidence"
                 doc.case_link_evidence = "No exact transaction or registration identifier was extracted; kept separate."
             case_ids.add(case.id)
-            missing_invoice_fields = [
-                field.field_name.replace("_", " ")
-                for field in doc.fields
-                if field.verification_status == "not_available"
-            ]
-            if missing_invoice_fields:
-                db.add(
-                    ValidationFinding(
-                        case_id=case.id,
-                        document_id=doc.id,
-                        rule_id="missing_invoice_fields",
-                        severity="low",
-                        kind="missing_information",
-                        explanation=(
-                            "Expected tax-invoice values were not found in the OCR text: "
-                            + ", ".join(missing_invoice_fields)
-                            + ". Verify each item against the source page."
-                        ),
-                        source_pages=",".join(str(page.page_number) for page in pages),
+            if doc.category == "tax_invoice":
+                missing_invoice_fields = [
+                    field.field_name.replace("_", " ")
+                    for field in doc.fields
+                    if field.verification_status == "not_available"
+                ]
+                if missing_invoice_fields:
+                    db.add(
+                        ValidationFinding(
+                            case_id=case.id,
+                            document_id=doc.id,
+                            rule_id="missing_invoice_fields",
+                            severity="low",
+                            kind="missing_information",
+                            explanation=(
+                                "Expected tax-invoice values were not found in the OCR text: "
+                                + ", ".join(missing_invoice_fields)
+                                + ". Verify each item against the source page."
+                            ),
+                            source_pages=",".join(str(page.page_number) for page in pages),
+                        )
                     )
-                )
+            if doc.category == "gift_deed":
+                rel_field = next((f for f in doc.fields if f.field_name == "donor_donee_relationship"), None)
+                if rel_field and rel_field.verification_status == "not_available":
+                    db.add(
+                        ValidationFinding(
+                            case_id=case.id,
+                            document_id=doc.id,
+                            rule_id="missing_donor_donee_relationship",
+                            severity="low",
+                            kind="missing_information",
+                            explanation="Expected donor-donee relationship was not explicitly stated in the recital text. Verify against the source document.",
+                            source_pages=str(rel_field.source_page),
+                        )
+                    )
+                if rel_field and rel_field.extraction_method == "ambiguous_recital":
+                    db.add(
+                        ValidationFinding(
+                            case_id=case.id,
+                            document_id=doc.id,
+                            rule_id="ambiguous_donor_donee_relationship",
+                            severity="medium",
+                            kind="ambiguous_relationship",
+                            explanation=f"The donor-donee relationship in the recital text is ambiguous ({rel_field.extracted_value}). Verify against the source document.",
+                            evidence=rel_field.evidence,
+                            source_pages=str(rel_field.source_page),
+                        )
+                    )
             for field in doc.fields:
                 if field.field_name.endswith("_name") and field.extracted_value:
                     person = Person(display_name=field.extracted_value, name_original=field.extracted_value)

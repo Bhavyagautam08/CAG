@@ -699,8 +699,17 @@ function Review() {
   });
   const positionedRules = ocrTableRules.length ? ocrTableRules : tableRulesQuery.data?.table_lines ?? [];
   const saveField = useMutation({
-    mutationFn: ({ field, value }: { field: Field; value: string }) => api(`/fields/${field.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value, verification_status: "verified" }) }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["document", id] }); qc.invalidateQueries({ queryKey: ["document-audit", id] }); setMessage("Field correction saved to the review history."); },
+    mutationFn: ({ field, value, status }: { field: Field; value: string; status?: string }) =>
+      api(`/fields/${field.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value, verification_status: status ?? "verified" }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["document", id] });
+      qc.invalidateQueries({ queryKey: ["document-audit", id] });
+      setMessage("Field update saved to the review history.");
+    },
   });
   const saveOcr = useMutation({
     mutationFn: () => api(`/pages/${page?.id}/ocr`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ corrected_text: ocrDraft }) }),
@@ -789,7 +798,14 @@ function Review() {
             {doc.case_link_status === "insufficient_evidence" && linkedCases.length > 0 && <div className="link-actions"><select aria-label="Possible case" id="link-case-select"><option value="">Select a possible case</option>{linkedCases.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select><button className="button button-secondary button-small" onClick={() => { const selectedCase = document.getElementById("link-case-select") as HTMLSelectElement | null; if (selectedCase?.value) linkCase.mutate({ case_id: selectedCase.value, decision: "approved" }); }}>Approve case link</button></div>}
           </div>
           <div className="section-rule" /><h3 className="subheading">Extracted fields <span>{doc.fields.length}</span></h3>
-          {doc.fields.length ? doc.fields.map((field) => <FieldEditor field={field} key={field.id} onSave={(value) => saveField.mutate({ field, value })} />) : <p className="empty-inline">No fields were extracted. Review the source and OCR text.</p>}
+          {doc.fields.length ? doc.fields.map((field) => (
+            <FieldEditor
+              field={field}
+              key={field.id}
+              onSave={(value) => saveField.mutate({ field, value, status: "verified" })}
+              onVerify={(f) => saveField.mutate({ field: f, value: f.value ?? "", status: "verified" })}
+            />
+          )) : <p className="empty-inline">No fields were extracted. Review the source and OCR text.</p>}
         </section>
         <section className="panel ocr-panel"><div className="panel-heading"><div><h2>OCR text</h2><p>Original text is retained separately</p></div></div>
           {page?.ocr_error && <div className="ocr-warning"><AlertCircle size={14} />{page.ocr_error}</div>}
@@ -823,15 +839,53 @@ function Review() {
   </>;
 }
 
-function FieldEditor({ field, onSave }: { field: Field; onSave: (value: string) => void }) {
+function FieldEditor({
+  field,
+  onSave,
+  onVerify,
+}: {
+  field: Field;
+  onSave: (value: string) => void;
+  onVerify?: (field: Field) => void;
+}) {
   const [value, setValue] = useState(field.value ?? "");
   const [editing, setEditing] = useState(false);
   useEffect(() => { setValue(field.value ?? ""); }, [field.value]);
   const missing = field.verification_status === "not_available";
-  return <div className={`field-card ${missing ? "missing" : ""}`}><div className="field-heading"><b>{humanize(field.field_name)}</b><span className={`verification ${field.verification_status}`}>{missing ? "NOT AVAILABLE" : field.verification_status}</span></div>
-    {editing ? <div className="field-edit"><input value={value} onChange={(event) => setValue(event.target.value)} autoFocus /><button className="button button-primary button-small" onClick={() => { onSave(value); setEditing(false); }}>Save</button><button className="icon-button" onClick={() => { setValue(field.value ?? ""); setEditing(false); }} aria-label="Cancel"><X size={15} /></button></div> : <button className="field-value" onClick={() => setEditing(true)}>{field.display_value ?? (value || (field.verification_status === "not_available" ? "Not available" : "Not extracted"))} <span>Edit</span></button>}
-    <small>Source page {field.source_page}{field.evidence ? ` · “${field.evidence}”` : ""}</small>
-  </div>;
+  return (
+    <div className={`field-card ${missing ? "missing" : ""}`}>
+      <div className="field-heading">
+        <b>{humanize(field.field_name)}</b>
+        <div className="field-actions-inline">
+          <span className={`verification ${field.verification_status}`}>
+            {missing ? "NOT AVAILABLE" : field.verification_status}
+          </span>
+          {field.verification_status !== "verified" && field.value && onVerify && (
+            <button
+              type="button"
+              className="button button-secondary button-small button-verify"
+              onClick={() => onVerify(field)}
+              title="Verify and confirm this field"
+            >
+              <Check size={11} /> Verify
+            </button>
+          )}
+        </div>
+      </div>
+      {editing ? (
+        <div className="field-edit">
+          <input value={value} onChange={(event) => setValue(event.target.value)} autoFocus />
+          <button className="button button-primary button-small" onClick={() => { onSave(value); setEditing(false); }}>Save</button>
+          <button className="icon-button" onClick={() => { setValue(field.value ?? ""); setEditing(false); }} aria-label="Cancel"><X size={15} /></button>
+        </div>
+      ) : (
+        <button className="field-value" onClick={() => setEditing(true)}>
+          {field.display_value ?? (value || (field.verification_status === "not_available" ? "Not available" : "Not extracted"))} <span>Edit</span>
+        </button>
+      )}
+      <small>Source page {field.source_page}{field.evidence ? ` · “${field.evidence}”` : ""}</small>
+    </div>
+  );
 }
 
 function Cases() {
@@ -894,6 +948,7 @@ function ErrorBanner({ message }: { message: string }) {
 }
 
 function humanize(value: string): string {
+  if (value === "donor_donee_relationship") return "Donor-Donee Relationship";
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 

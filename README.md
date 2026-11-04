@@ -48,7 +48,7 @@ npm install
 npm run build
 ```
 
-PaddlePaddle currently publishes Windows wheels through Python 3.13; Python 3.12 is the recommended setup for this project. The first OCR request downloads the PaddleOCR and EasyOCR model weights into their local caches and may take longer than subsequent pages. Keep the computer online for that first model download. `OCR_LANGUAGES` accepts `eng`, `hin`, and `mar` (or `en`, `hi`, and `mr`); the Devanagari PaddleOCR model supports Hindi and Marathi, and EasyOCR is configured for the requested languages.
+PaddlePaddle currently publishes Windows wheels through Python 3.13; Python 3.12 is the recommended setup for this project. The default fast path runs PaddleOCR once per scanned page at 180 DPI. EasyOCR cross-verification and the no-text rotated-page retry are disabled by default because they can multiply processing time on large scans; enable `OCR_SECONDARY_VERIFICATION=true` or `OCR_RETRY_ROTATED_PAGES=true` in `.env` when those checks are required. The first OCR request downloads the PaddleOCR model weights into its local cache and may take longer than subsequent pages. Keep the computer online for that first model download. `OCR_LANGUAGES` accepts `eng`, `hin`, and `mar` (or `en`, `hi`, and `mr`); the Devanagari PaddleOCR model supports Hindi and Marathi.
 
 Start the backend from the project root:
 
@@ -109,7 +109,9 @@ Copy `.env.example` to `.env`. Important settings:
 | `DATABASE_URL` | SQLAlchemy URL; defaults to a local SQLite database. |
 | `STORAGE_DIR` | Private uploaded PDF and rendered page storage, outside the frontend tree. |
 | `MAX_UPLOAD_MB` / `MAX_PDF_PAGES` | Upload and processing limits. |
-| `OCR_LANGUAGES` / `OCR_DPI` | OCR language codes (`eng`, `hin`, `mar`) and render resolution. |
+| `OCR_LANGUAGES` / `OCR_DEVICE` / `OCR_DPI` | OCR language codes (`eng`, `hin`, `mar`), processor selection (`auto`, `gpu`, or `cpu`), and render resolution. `auto` uses CUDA when both OCR runtimes support it and otherwise falls back to CPU. |
+| `OCR_SECONDARY_VERIFICATION` | Runs EasyOCR after PaddleOCR for independent verification; disabled by default for large-file throughput. |
+| `OCR_RETRY_ROTATED_PAGES` | Runs a second OCR pass at a likely alternate orientation when no words are found; disabled by default. |
 | `CORS_ORIGINS` | Comma-separated allowed frontend origins. |
 | `VITE_API_URL` | Frontend API base URL. |
 
