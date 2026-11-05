@@ -7,7 +7,7 @@ import {
   Clock3, FileCheck2, FileDown, FileText, Files, LayoutDashboard, LockKeyhole, Menu, Search, ShieldCheck,
   ImagePlus, RotateCcw, Trash2, Upload, X,
 } from "lucide-react";
-import { api, apiBase, ComparisonDetail, ComparisonRun, DashboardData, Document, download, Field, uploadImages, uploadPdf } from "./api";
+import { api, apiBase, ComparisonDetail, ComparisonRun, DashboardData, Document, download, Field, StampDutyAssessment, StampDutyAssessmentUpdate, updateStampDutyAssessment, uploadImages, uploadPdf } from "./api";
 
 type Ingestion = { id: string; filename: string; source_type: "pdf" | "image"; status: string; progress: number; stage?: string; error: string | null };
 type CaseItem = { id: string; title: string; reference: string | null; status: string; documents: Document[]; people: { id: string; name: string; relationship: string }[]; properties: { id: string; identifier: string; description: string | null }[] };
@@ -310,7 +310,7 @@ function ExtractedFieldTable({ fields }: { fields: Field[] }) {
             return (
               <tr className={missing ? "missing" : ""} key={field.id}>
                 <td>{humanize(field.field_name)}</td>
-                <td>{field.display_value ?? (missing ? "Not available" : field.value ?? "No value extracted")}</td>
+                <td>{field.display_value ?? (missing ? "Not available" : (field.value ? formatFieldValue(field.field_name, field.value) : "No value extracted"))}</td>
                 <td><span className={`ocr-field-status ${missing ? "missing" : ""}`}>{missing ? "NOT AVAILABLE" : humanize(field.verification_status)}</span></td>
               </tr>
             );
@@ -790,6 +790,18 @@ function Review() {
         <div className="source-image-wrap">{page && (sourceUrl ? <img src={sourceUrl} alt={`Original source page ${activePage}`} onLoad={(event) => setSourceDimensions({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} /> : <span className={sourceError ? "form-error" : "muted-cell"}>{sourceError || "Loading source page…"}</span>)}</div>
       </section>
       <div className="review-right">
+        {(doc.category === "gift_deed" || doc.stamp_duty_assessment) && (
+          <StampDutyAssessmentPanel
+            doc={doc}
+            assessment={doc.stamp_duty_assessment}
+            onJumpPage={(pageNum) => setActivePage(pageNum)}
+            onUpdated={() => {
+              qc.invalidateQueries({ queryKey: ["document", id] });
+              qc.invalidateQueries({ queryKey: ["document-audit", id] });
+              setMessage("Stamp-duty assessment updated.");
+            }}
+          />
+        )}
         <section className="panel extracted-panel"><div className="panel-heading"><div><h2>Document details</h2><p>Classification and field review</p></div></div>
           <label className="form-label">Document type<select value={doc.category} onChange={(event) => saveCategory.mutate(event.target.value)}><option value="unknown">Unknown / unclassified</option>{["gift_deed","valuation","receipt","identity_document","challan","condominium","survey_record","official_letter","registration","property_tax","tax_invoice"].map((item) => <option key={item} value={item}>{humanize(item)}</option>)}</select></label>
           <div className="classification-evidence"><b>Classification evidence</b><span>{doc.classification_evidence || "No configured category rule matched."}</span><small>Rule-match score {doc.confidence_proxy.toFixed(2)}; heuristic only, not a calibrated probability or accuracy score.</small></div>
@@ -804,6 +816,7 @@ function Review() {
               key={field.id}
               onSave={(value) => saveField.mutate({ field, value, status: "verified" })}
               onVerify={(f) => saveField.mutate({ field: f, value: f.value ?? "", status: "verified" })}
+              onJumpPage={(pageNumber) => setActivePage(pageNumber)}
             />
           )) : <p className="empty-inline">No fields were extracted. Review the source and OCR text.</p>}
         </section>
@@ -839,14 +852,402 @@ function Review() {
   </>;
 }
 
+function StampDutyAssessmentPanel({
+  doc,
+  assessment,
+  onJumpPage,
+  onUpdated,
+}: {
+  doc: Document;
+  assessment?: StampDutyAssessment | null;
+  onJumpPage: (page: number) => void;
+  onUpdated: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [propertyType, setPropertyType] = useState(assessment?.property_type ?? "residential_property");
+  const [relationshipEligibility, setRelationshipEligibility] = useState(assessment?.relationship_eligibility ?? "eligible");
+  const [jurisdiction, setJurisdiction] = useState(assessment?.jurisdiction ?? "maharashtra_metro_cess");
+  const [marketValue, setMarketValue] = useState<string>(assessment?.market_value != null ? String(assessment.market_value) : "");
+  const [stampDutyPaid, setStampDutyPaid] = useState<string>(assessment?.stamp_duty_paid != null ? String(assessment.stamp_duty_paid) : (assessment?.total_stamp_duty_paid != null ? String(assessment.total_stamp_duty_paid) : ""));
+  const [reviewStatus, setReviewStatus] = useState(assessment?.review_status ?? "unreviewed");
+  const [reviewerNotes, setReviewerNotes] = useState(assessment?.reviewer_notes ?? "");
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    if (assessment) {
+      setPropertyType(assessment.property_type ?? "residential_property");
+      setRelationshipEligibility(assessment.relationship_eligibility ?? "eligible");
+      setJurisdiction(assessment.jurisdiction ?? "maharashtra_metro_cess");
+      setMarketValue(assessment.market_value != null ? String(assessment.market_value) : "");
+      setStampDutyPaid(assessment.stamp_duty_paid != null ? String(assessment.stamp_duty_paid) : (assessment.total_stamp_duty_paid != null ? String(assessment.total_stamp_duty_paid) : ""));
+      setReviewStatus(assessment.review_status ?? "unreviewed");
+      setReviewerNotes(assessment.reviewer_notes ?? "");
+    }
+  }, [assessment]);
+
+  const updateMutation = useMutation({
+    mutationFn: (payload: StampDutyAssessmentUpdate) => updateStampDutyAssessment(doc.id, payload),
+    onSuccess: () => {
+      setEditing(false);
+      setSaveError("");
+      onUpdated();
+    },
+    onError: (err: Error) => {
+      setSaveError(err.message);
+    },
+  });
+
+  const handleSave = () => {
+    setSaveError("");
+    const parsedMv = marketValue.trim() ? Number(marketValue.replace(/[^\d.-]/g, "")) : undefined;
+    const parsedPaid = stampDutyPaid.trim() ? Number(stampDutyPaid.replace(/[^\d.-]/g, "")) : undefined;
+    updateMutation.mutate({
+      property_type: propertyType,
+      relationship_eligibility: relationshipEligibility as any,
+      jurisdiction: jurisdiction,
+      market_value: parsedMv && !isNaN(parsedMv) ? parsedMv : undefined,
+      stamp_duty_paid: parsedPaid && !isNaN(parsedPaid) ? parsedPaid : undefined,
+      total_stamp_duty_paid: parsedPaid && !isNaN(parsedPaid) ? parsedPaid : undefined,
+      review_status: reviewStatus as any,
+      reviewer_notes: reviewerNotes || undefined,
+    });
+  };
+
+  const handleQuickConfirm = () => {
+    updateMutation.mutate({
+      review_status: "confirmed",
+      reviewer_notes: reviewerNotes || "Assessment confirmed by reviewer.",
+    });
+  };
+
+  const status = assessment?.status ?? "requires_review";
+  const statusLabels: Record<string, string> = {
+    compliant: "Compliant",
+    short_paid: "Short paid",
+    requires_review: "Requires review",
+    not_applicable: "Not applicable",
+    not_available: "Not available",
+  };
+  const statusDisplay = statusLabels[status] ?? humanize(status);
+
+  return (
+    <section className="panel stamp-duty-panel">
+      <div className="panel-heading sda-panel-heading">
+        <div>
+          <div className="sda-title-row">
+            <h2>Checklist 3: Stamp-duty assessment</h2>
+            <span className={`sda-status-badge ${status}`}>
+              Status: {statusDisplay}
+            </span>
+            <span className={`sda-review-badge ${assessment?.review_status ?? "unreviewed"}`}>
+              {humanize(assessment?.review_status ?? "unreviewed")}
+            </span>
+          </div>
+          <p>Maharashtra Stamp Act, Article 34 (Family Gift Concession: ₹200 base duty + 1% Metro Cess)</p>
+        </div>
+        <div className="sda-header-actions">
+          {!editing ? (
+            <>
+              {assessment?.review_status !== "confirmed" && (
+                <button
+                  type="button"
+                  className="button button-secondary button-small button-verify"
+                  onClick={handleQuickConfirm}
+                  disabled={updateMutation.isPending}
+                  title="Confirm and verify this stamp duty assessment"
+                >
+                  <Check size={12} /> Confirm Assessment
+                </button>
+              )}
+              <button
+                type="button"
+                className="button button-secondary button-small"
+                onClick={() => setEditing(true)}
+              >
+                Edit Assessment
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="button button-secondary button-small"
+              onClick={() => { setEditing(false); setSaveError(""); }}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      </div>
+
+      {saveError && (
+        <div className="notice notice-error sda-notice">
+          <AlertCircle size={15} /> {saveError}
+        </div>
+      )}
+
+      {editing ? (
+        <div className="sda-edit-form">
+          <div className="sda-form-grid">
+            <label className="form-label">
+              Property type
+              <select value={propertyType} onChange={(e) => setPropertyType(e.target.value)}>
+                <option value="residential_property">Residential property (Eligible)</option>
+                <option value="agricultural_land">Agricultural land (Eligible)</option>
+                <option value="other_property">Other property (Non-concessional)</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </label>
+
+            <label className="form-label">
+              Article 34 eligibility
+              <select
+                value={relationshipEligibility}
+                onChange={(e) => setRelationshipEligibility(e.target.value)}
+              >
+                <option value="eligible">Eligible</option>
+                <option value="not_eligible">Not eligible</option>
+                <option value="ambiguous">Ambiguous</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </label>
+
+            <label className="form-label">
+              Jurisdiction
+              <select value={jurisdiction} onChange={(e) => setJurisdiction(e.target.value)}>
+                <option value="maharashtra_metro_cess">Metro (Mumbai / MMRDA / PMC / Metro Cess 1%)</option>
+                <option value="non_metro">Non-metro / Rural (Exempt from Metro Cess)</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </label>
+
+            <label className="form-label">
+              Market value (₹)
+              <input
+                type="text"
+                value={marketValue}
+                onChange={(e) => setMarketValue(e.target.value)}
+                placeholder="e.g. 2500000"
+              />
+            </label>
+
+            <label className="form-label">
+              Stamp duty paid (₹)
+              <input
+                type="text"
+                value={stampDutyPaid}
+                onChange={(e) => setStampDutyPaid(e.target.value)}
+                placeholder="e.g. 20000"
+              />
+            </label>
+
+            <label className="form-label">
+              Review status
+              <select value={reviewStatus} onChange={(e) => setReviewStatus(e.target.value)}>
+                <option value="unreviewed">Unreviewed</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="corrected">Corrected</option>
+                <option value="requires_review">Requires review</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="form-label sda-notes-label">
+            Reviewer notes / Findings
+            <textarea
+              rows={2}
+              value={reviewerNotes}
+              onChange={(e) => setReviewerNotes(e.target.value)}
+              placeholder="Enter notes or verification findings..."
+            />
+          </label>
+
+          <div className="sda-form-actions">
+            <button
+              type="button"
+              className="button button-primary button-small"
+              onClick={handleSave}
+              disabled={updateMutation.isPending}
+            >
+              <Check size={13} /> {updateMutation.isPending ? "Saving..." : "Save Assessment"}
+            </button>
+            <button
+              type="button"
+              className="button button-secondary button-small"
+              onClick={() => { setEditing(false); setSaveError(""); }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="sda-body">
+          {/* Parties & Relationship */}
+          <div className="sda-section">
+            <div className="sda-row">
+              <div className="sda-field">
+                <span className="sda-label">Donor</span>
+                <span className="sda-val">{assessment?.donor_name || "Not extracted"}</span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Donee</span>
+                <span className="sda-val">{assessment?.donee_name || "Not extracted"}</span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Relationship</span>
+                <span className="sda-val">
+                  {assessment?.relationship || "Not stated in recital"}
+                  {assessment?.relationship_normalized ? (
+                    <small className="sda-sub"> (Normalized: {assessment.relationship_normalized})</small>
+                  ) : null}
+                </span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Article 34 eligibility</span>
+                <span className={`sda-pill ${assessment?.relationship_eligibility || "unknown"}`}>
+                  {humanize(assessment?.relationship_eligibility || "unknown")}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Property Schedule */}
+          <div className="sda-section">
+            <div className="sda-section-title">Schedule of property</div>
+            <div className="sda-row">
+              <div className="sda-field">
+                <span className="sda-label">Property type</span>
+                <span className="sda-val">{formatFieldValue("property_type", assessment?.property_type || "unknown")}</span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Location</span>
+                <span className="sda-val">{assessment?.property_location || "N/A"}</span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Survey / Gat no.</span>
+                <span className="sda-val">{assessment?.survey_number || "N/A"}</span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Area</span>
+                <span className="sda-val">{assessment?.area || "N/A"}</span>
+              </div>
+            </div>
+            {assessment?.property_description && (
+              <div className="sda-description-snippet">
+                <b>Description:</b> <span>{assessment.property_description}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Financial Assessment Breakdown */}
+          <div className="sda-section">
+            <div className="sda-section-title">Financial calculation breakdown</div>
+            <div className="sda-financial-grid">
+              <div className="sda-stat-box">
+                <span className="sda-label">Market value</span>
+                <b className="sda-stat-val">{formatCurrency(assessment?.market_value)}</b>
+                <small>Ready Reckoner / declared</small>
+              </div>
+              <div className="sda-stat-box">
+                <span className="sda-label">Base duty</span>
+                <b className="sda-stat-val">{formatCurrency(assessment?.base_stamp_duty ?? 200)}</b>
+                <small>Article 34 concession</small>
+              </div>
+              <div className="sda-stat-box">
+                <span className="sda-label">Metro Cess</span>
+                <b className="sda-stat-val">
+                  {assessment?.metro_cess_rate
+                    ? `${formatCurrency(assessment.metro_cess)} (1%)`
+                    : assessment?.metro_cess_rate === 0
+                      ? "Exempt (0%)"
+                      : "—"}
+                </b>
+                <small>{assessment?.jurisdiction === "non_metro" ? "Non-metro rural" : "Urban / Metro jurisdiction"}</small>
+              </div>
+              <div className="sda-stat-box highlight">
+                <span className="sda-label">Expected total</span>
+                <b className="sda-stat-val">{formatCurrency(assessment?.expected_total)}</b>
+                <small>Base + Metro Cess</small>
+              </div>
+              <div className="sda-stat-box">
+                <span className="sda-label">Actual paid amount</span>
+                <b className="sda-stat-val">{formatCurrency(assessment?.total_stamp_duty_paid ?? assessment?.stamp_duty_paid)}</b>
+                <small>{assessment?.challan_number ? `Challan: ${assessment.challan_number}` : "Total duty deposited"}</small>
+              </div>
+              <div className={`sda-stat-box difference ${assessment?.difference != null && assessment.difference < 0 ? "deficit" : "compliant"}`}>
+                <span className="sda-label">Difference</span>
+                <b className="sda-stat-val">
+                  {assessment?.difference != null
+                    ? `${formatCurrency(assessment.difference)} ${assessment.difference < 0 ? "(Short paid)" : "(Compliant)"}`
+                    : "—"}
+                </b>
+                <small>{assessment?.difference != null && assessment.difference < 0 ? "Deficit requires recovery" : "Sufficient duty paid"}</small>
+              </div>
+            </div>
+          </div>
+
+          {/* Source Pages & Evidence */}
+          <div className="sda-section sda-evidence-section">
+            <div className="sda-meta-row">
+              <div className="sda-source-pages">
+                <span className="sda-label">Source pages:</span>
+                <div className="sda-page-badges">
+                  {assessment?.source_pages?.length ? (
+                    assessment.source_pages.map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        className="source-page-jump-btn"
+                        onClick={() => onJumpPage(p)}
+                        title={`Jump to page ${p}`}
+                      >
+                        Page {p}
+                      </button>
+                    ))
+                  ) : (
+                    <span className="muted-cell">Page 1</span>
+                  )}
+                </div>
+              </div>
+              <div className="sda-rule-ver">
+                <span className="sda-label">Rule version:</span>
+                <code>{assessment?.legal_rule_version || "MH-ART34-2024.1"}</code>
+              </div>
+            </div>
+
+            {assessment?.evidence && (
+              <div className="sda-evidence-snippet">
+                <b>Evidence text:</b>
+                <span>
+                  {typeof assessment.evidence === "object"
+                    ? JSON.stringify(assessment.evidence, null, 2)
+                    : String(assessment.evidence)}
+                </span>
+              </div>
+            )}
+
+            {assessment?.reviewer_notes && (
+              <div className="sda-notes-snippet">
+                <b>Reviewer notes:</b>
+                <span>{assessment.reviewer_notes}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function FieldEditor({
   field,
   onSave,
   onVerify,
+  onJumpPage,
 }: {
   field: Field;
   onSave: (value: string) => void;
   onVerify?: (field: Field) => void;
+  onJumpPage?: (page: number) => void;
 }) {
   const [value, setValue] = useState(field.value ?? "");
   const [editing, setEditing] = useState(false);
@@ -880,10 +1281,25 @@ function FieldEditor({
         </div>
       ) : (
         <button className="field-value" onClick={() => setEditing(true)}>
-          {field.display_value ?? (value || (field.verification_status === "not_available" ? "Not available" : "Not extracted"))} <span>Edit</span>
+          {field.display_value ?? (value ? formatFieldValue(field.field_name, value) : (field.verification_status === "not_available" ? "Not available" : "Not extracted"))} <span>Edit</span>
         </button>
       )}
-      <small>Source page {field.source_page}{field.evidence ? ` · “${field.evidence}”` : ""}</small>
+      <small>
+        {field.source_page ? (
+          <button
+            type="button"
+            className="source-page-jump-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              onJumpPage?.(field.source_page);
+            }}
+            title={`Jump viewer to page ${field.source_page}`}
+          >
+            Page {field.source_page}
+          </button>
+        ) : null}
+        {field.evidence ? ` · “${field.evidence}”` : ""}
+      </small>
     </div>
   );
 }
@@ -947,9 +1363,96 @@ function ErrorBanner({ message }: { message: string }) {
   return <div className="notice notice-error"><AlertCircle size={16} />{message}</div>;
 }
 
+const FIELD_LABELS: Record<string, string> = {
+  donor_donee_relationship: "Donor-Donee Relationship",
+  relationship_value: "Relationship (Recital)",
+  relationship_eligibility: "Article 34 Eligibility",
+  property_type: "Property Type",
+  property_description: "Property Description",
+  property_location: "Property Location",
+  survey_number: "Survey / Gat Number",
+  area: "Property Area",
+  market_value: "Market / Ready Reckoner Value",
+  stamp_duty_paid: "Stamp Duty Paid",
+  metro_cess_paid: "Metro Cess Paid",
+  total_stamp_duty_paid: "Total Stamp Duty Paid",
+  challan_number: "Challan / Receipt Number",
+  expected_stamp_duty: "Expected Stamp Duty (Art. 34)",
+  stamp_duty_difference: "Stamp Duty Difference",
+  stamp_duty_status: "Stamp Duty Assessment Status",
+};
+
 function humanize(value: string): string {
-  if (value === "donor_donee_relationship") return "Donor-Donee Relationship";
+  if (!value) return "";
+  if (FIELD_LABELS[value]) return FIELD_LABELS[value];
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatCurrency(val: number | string | null | undefined): string {
+  if (val == null || val === "") return "—";
+  const num = typeof val === "number" ? val : Number(val.toString().replace(/[^\d.-]/g, ""));
+  if (isNaN(num)) return String(val);
+  const isNeg = num < 0;
+  const absInt = Math.round(Math.abs(num));
+  const s = absInt.toString();
+  let formatted = "";
+  if (s.length <= 3) {
+    formatted = s;
+  } else {
+    const last3 = s.slice(-3);
+    let rest = s.slice(0, -3);
+    const groups: string[] = [];
+    while (rest.length > 2) {
+      groups.unshift(rest.slice(-2));
+      rest = rest.slice(0, -2);
+    }
+    if (rest.length > 0) groups.unshift(rest);
+    formatted = `${groups.join(",")},${last3}`;
+  }
+  return isNeg ? `-₹${formatted}` : `₹${formatted}`;
+}
+
+function formatFieldValue(fieldName: string, rawValue: string | null | undefined): string {
+  if (!rawValue) return "";
+  if (["market_value", "stamp_duty_paid", "metro_cess_paid", "total_stamp_duty_paid", "expected_stamp_duty"].includes(fieldName)) {
+    return formatCurrency(rawValue);
+  }
+  if (fieldName === "stamp_duty_difference") {
+    const num = Number(rawValue);
+    if (!isNaN(num)) {
+      return num < 0 ? `${formatCurrency(num)} (Short Paid)` : `${formatCurrency(num)} (Compliant)`;
+    }
+    return formatCurrency(rawValue);
+  }
+  if (fieldName === "property_type") {
+    const map: Record<string, string> = {
+      residential_property: "Residential Property (Eligible)",
+      agricultural_land: "Agricultural Land (Eligible)",
+      other_property: "Commercial / Other (Non-concessional)",
+      unknown: "Unknown / Mixed Indicators",
+    };
+    return map[rawValue] ?? humanize(rawValue);
+  }
+  if (fieldName === "relationship_eligibility") {
+    const map: Record<string, string> = {
+      eligible: "Eligible (Article 34 Concession)",
+      not_eligible: "Not Eligible (Standard Conveyance Applies)",
+      ambiguous: "Ambiguous Recital (Review Required)",
+      unknown: "Unknown / Not Explicitly Stated",
+    };
+    return map[rawValue] ?? humanize(rawValue);
+  }
+  if (fieldName === "stamp_duty_status") {
+    const map: Record<string, string> = {
+      compliant: "Compliant",
+      short_paid: "Short Paid (Deficit)",
+      requires_review: "Requires Review",
+      not_applicable: "Not Applicable",
+      not_available: "Not Available",
+    };
+    return map[rawValue] ?? humanize(rawValue);
+  }
+  return rawValue;
 }
 
 function formatBytes(bytes: number): string {

@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .config import get_settings
-from .models import Ingestion, LogicalDocument, Page
+from .models import Ingestion, LogicalDocument, Page, StampDutyAssessment
 from .ocr import detect_table_lines
 from .pdf_utils import LocalImageBundle
 
@@ -98,9 +98,72 @@ def _wrap(text: str, font_name: str, font_size: float, max_width: float) -> list
     return lines
 
 
+CURRENCY_FIELD_NAMES = {
+    "market_value",
+    "stamp_duty_paid",
+    "metro_cess_paid",
+    "total_stamp_duty_paid",
+    "expected_stamp_duty",
+    "stamp_duty_difference",
+}
+
+_FIELD_LABEL_OVERRIDES = {
+    "donor_name": "Donor Name",
+    "donee_name": "Donee Name",
+    "donor_donee_relationship": "Donor-Donee Relationship",
+    "relationship_value": "Relationship (Recital)",
+    "relationship_eligibility": "Article 34 Eligibility",
+    "property_type": "Property Type",
+    "property_description": "Property Description",
+    "property_location": "Property Location",
+    "survey_number": "Survey / Gat Number",
+    "area": "Property Area",
+    "property_area": "Property Area",
+    "property_id": "Property ID",
+    "registration_number": "Registration Number",
+    "registration_date": "Registration Date",
+    "document_date": "Document Date",
+    "market_value": "Market / Ready Reckoner Value",
+    "stamp_duty_paid": "Stamp Duty Paid",
+    "metro_cess_paid": "Metro Cess Paid",
+    "total_stamp_duty_paid": "Total Stamp Duty Paid",
+    "challan_number": "Challan / Receipt Number",
+    "expected_stamp_duty": "Expected Stamp Duty (Art. 34)",
+    "stamp_duty_difference": "Stamp Duty Difference",
+    "stamp_duty_status": "Stamp Duty Assessment Status",
+}
+
+
+def _format_rupees(amount: Any) -> str:
+    if amount is None or amount == "":
+        return "Not available"
+    try:
+        val = int(amount)
+    except (ValueError, TypeError):
+        try:
+            val = int(float(amount))
+        except (ValueError, TypeError):
+            return str(amount)
+    is_neg = val < 0
+    s = str(abs(val))
+    if len(s) <= 3:
+        formatted = s
+    else:
+        last3 = s[-3:]
+        rest = s[:-3]
+        groups = []
+        while len(rest) > 2:
+            groups.insert(0, rest[-2:])
+            rest = rest[:-2]
+        if rest:
+            groups.insert(0, rest)
+        formatted = ",".join(groups) + "," + last3
+    return f"-₹{formatted}" if is_neg else f"₹{formatted}"
+
+
 def _humanize(value: str) -> str:
-    if value == "donor_donee_relationship":
-        return "Donor-Donee Relationship"
+    if value in _FIELD_LABEL_OVERRIDES:
+        return _FIELD_LABEL_OVERRIDES[value]
     return re.sub(r"\s+", " ", value.replace("_", " ")).strip().title()
 
 
@@ -108,10 +171,47 @@ def _display_field_value(field: Any) -> str:
     value = field.verified_value if field.verified_value is not None else field.extracted_value
     if field.verification_status == "not_available":
         return "Not available - not located in extracted text; verify the source."
-    if not value:
+    if value is None or value == "":
         return "No value extracted"
     if field.sensitive:
         return f"••••{value[-4:]}" if len(value) > 4 else "••••"
+    if field.field_name in CURRENCY_FIELD_NAMES:
+        formatted = _format_rupees(value)
+        if field.field_name == "stamp_duty_difference":
+            try:
+                diff_val = int(float(value))
+                if diff_val < 0:
+                    return f"{formatted} (Short Paid)"
+                else:
+                    return f"{formatted} (Compliant)"
+            except (ValueError, TypeError):
+                pass
+        return formatted
+    if field.field_name == "property_type":
+        labels = {
+            "residential_property": "Residential Property (Eligible)",
+            "agricultural_land": "Agricultural Land (Eligible)",
+            "other_property": "Commercial / Other (Non-concessional)",
+            "unknown": "Unknown / Mixed Indicators",
+        }
+        return labels.get(value, _humanize(value))
+    if field.field_name == "relationship_eligibility":
+        labels = {
+            "eligible": "Eligible (Article 34 Concession)",
+            "not_eligible": "Not Eligible (Standard Conveyance Applies)",
+            "ambiguous": "Ambiguous Recital (Review Required)",
+            "unknown": "Unknown / Not Explicitly Stated",
+        }
+        return labels.get(value, _humanize(value))
+    if field.field_name == "stamp_duty_status":
+        labels = {
+            "compliant": "Compliant",
+            "short_paid": "Short Paid (Deficit)",
+            "requires_review": "Requires Review",
+            "not_applicable": "Not Applicable (Concession Ineligible)",
+            "not_available": "Not Available",
+        }
+        return labels.get(value, _humanize(value))
     return str(value)
 
 
@@ -478,6 +578,162 @@ def _draw_text_line(
     report_canvas.drawString(x, y, line, shaping=True)
 
 
+def _draw_stamp_duty_assessment(
+    report_canvas: canvas.Canvas,
+    assessment: Any,
+    x: float,
+    y: float,
+    max_width: float,
+    font_name: str,
+    continue_panel_fn: Any,
+) -> float:
+    if y - 35 < 57:
+        y = continue_panel_fn("Checklist 3: Stamp-Duty Assessment (Article 34)")
+    y = _draw_section(report_canvas, x, y, "Checklist 3: Stamp-Duty Assessment (Article 34)")
+
+    status = (assessment.status or "requires_review").lower()
+    review_status = (assessment.review_status or "unreviewed").lower()
+
+    status_palette = {
+        "compliant": (HexColor("#15803d"), HexColor("#dcfce7"), "COMPLIANT"),
+        "short_paid": (HexColor("#b91c1c"), HexColor("#fee2e2"), "SHORT PAID"),
+        "requires_review": (HexColor("#c2410c"), HexColor("#ffedd5"), "REQUIRES REVIEW"),
+        "not_applicable": (HexColor("#4b5563"), HexColor("#f3f4f6"), "NOT APPLICABLE"),
+        "not_available": (HexColor("#64748b"), HexColor("#f1f5f9"), "NOT AVAILABLE"),
+    }
+    badge_fg, badge_bg, status_label = status_palette.get(
+        status, (HexColor("#4b5563"), HexColor("#f3f4f6"), status.upper())
+    )
+
+    banner_height = 28.0
+    if y - banner_height < 57:
+        y = continue_panel_fn("Checklist 3: Stamp-Duty Assessment (continued)")
+    report_canvas.setFillColor(white)
+    report_canvas.roundRect(x, y - banner_height + 3, max_width, banner_height, 4, fill=1, stroke=0)
+
+    badge_text = f"STATUS: {status_label}"
+    badge_w = min(140.0, pdfmetrics.stringWidth(badge_text, "Helvetica-Bold", 8) + 14)
+    report_canvas.setFillColor(badge_bg)
+    report_canvas.roundRect(x + 7, y - 22, badge_w, 18, 4, fill=1, stroke=0)
+    report_canvas.setFillColor(badge_fg)
+    report_canvas.setFont("Helvetica-Bold", 8)
+    report_canvas.drawString(x + 14, y - 16, badge_text, shaping=True)
+
+    review_text = f"REVIEW: {review_status.upper()}"
+    report_canvas.setFillColor(MUTED)
+    report_canvas.setFont(font_name, 7.5)
+    report_canvas.drawRightString(x + max_width - 8, y - 16, review_text, shaping=True)
+
+    y -= banner_height + 4
+
+    rows: list[tuple[str, str, bool]] = []
+
+    donor = assessment.donor_name or "Not extracted"
+    donee = assessment.donee_name or "Not extracted"
+    rows.append(("Parties", f"Donor: {donor}  |  Donee: {donee}", False))
+
+    rel_raw = assessment.relationship or "Not stated in recital"
+    rel_norm = assessment.relationship_normalized or "N/A"
+    rows.append(("Relationship (Recital)", f"{rel_raw} (Normalized: {rel_norm})", False))
+
+    elig_val = (assessment.relationship_eligibility or "unknown").replace("_", " ").title()
+    is_elig_bad = (assessment.relationship_eligibility or "") in ("not_eligible", "ambiguous")
+    rows.append(("Relationship Eligibility", elig_val, is_elig_bad))
+
+    prop_type = (assessment.property_type or "unknown").replace("_", " ").title()
+    rows.append(("Property Type", prop_type, assessment.property_type == "other_property"))
+
+    sched_loc = assessment.property_location or "N/A"
+    sched_surv = assessment.survey_number or "N/A"
+    sched_area = assessment.area or "N/A"
+    rows.append(("Schedule & Location", f"Location: {sched_loc} | Survey/Gat: {sched_surv} | Area: {sched_area}", False))
+
+    if assessment.property_description:
+        desc_clean = assessment.property_description.strip().replace("\n", " ")
+        if len(desc_clean) > 160:
+            desc_clean = desc_clean[:157] + "..."
+        rows.append(("Property Description", desc_clean, False))
+
+    mv_str = _format_rupees(assessment.market_value)
+    rows.append(("Market Value (True/Declared)", mv_str, False))
+
+    base_str = _format_rupees(assessment.base_duty) if assessment.base_duty is not None else "N/A"
+    rows.append(("Base Stamp Duty (Art. 34)", f"{base_str} (concessional family rate)", False))
+
+    if assessment.metro_cess_rate:
+        cess_rate_pct = f"{int(assessment.metro_cess_rate * 100)}%"
+        cess_amt_str = _format_rupees(assessment.metro_cess_amount)
+        cess_str = f"{cess_amt_str} ({cess_rate_pct} of Market Value)"
+    elif assessment.metro_cess_rate == 0.0:
+        cess_str = "Exempt (0% - Non-Metro Jurisdiction)"
+    else:
+        cess_str = "N/A"
+    rows.append(("Metro Cess Rate & Amount", cess_str, False))
+
+    exp_str = _format_rupees(assessment.expected_total) if assessment.expected_total is not None else "N/A"
+    rows.append(("Expected Total Stamp Duty", exp_str, False))
+
+    base_p = _format_rupees(assessment.stamp_duty_paid) if assessment.stamp_duty_paid is not None else "N/A"
+    metro_p = _format_rupees(assessment.metro_cess_paid) if assessment.metro_cess_paid is not None else "N/A"
+    tot_p = _format_rupees(assessment.total_stamp_duty_paid) if assessment.total_stamp_duty_paid is not None else "N/A"
+    rows.append(("Stamp Duty Paid", f"Base: {base_p} | Cess: {metro_p} | Total: {tot_p}", False))
+
+    if assessment.challan_number:
+        rows.append(("Challan / Receipt Number", str(assessment.challan_number), False))
+
+    if assessment.difference is not None:
+        diff_str = _format_rupees(assessment.difference)
+        if assessment.difference < 0:
+            diff_display = f"{diff_str} (Short Paid / Deficit)"
+            diff_bad = True
+        else:
+            diff_display = f"{diff_str} (Compliant / Surplus)"
+            diff_bad = False
+    else:
+        diff_display = "N/A"
+        diff_bad = status in ("short_paid", "requires_review")
+    rows.append(("Difference (Paid vs Expected)", diff_display, diff_bad))
+
+    jur_display = (assessment.jurisdiction or "Unknown").replace("_", " ").title()
+    rule_ver = assessment.legal_rule_version or "MH-ART34-2024.1"
+    rows.append(("Jurisdiction & Legal Rule", f"{jur_display} | Rule Version: {rule_ver}", False))
+    rows.append(("Legal Reference", "Maharashtra Stamp Act, Article 34 (Residential/Agricultural Gift to eligible family members: ₹200 base duty + 1% Metro Cess where applicable)", False))
+
+    if assessment.source_pages:
+        rows.append(("Assessment Source Pages", f"Page(s) {assessment.source_pages}", False))
+
+    if assessment.evidence:
+        ev_clean = str(assessment.evidence).strip().replace("\n", " ")
+        if len(ev_clean) > 220:
+            ev_clean = ev_clean[:217] + "..."
+        rows.append(("Evidence Excerpt", ev_clean, False))
+
+    if assessment.reviewer_notes:
+        notes_clean = str(assessment.reviewer_notes).strip().replace("\n", " ")
+        if len(notes_clean) > 220:
+            notes_clean = notes_clean[:217] + "..."
+        rows.append(("Reviewer Notes / Findings", notes_clean, status == "short_paid"))
+
+    for label, val_text, is_missing_or_bad in rows:
+        val_lines = _wrap(val_text, font_name, 7.5, max_width - 120)
+        row_lines = max(len(_wrap(label, font_name, 7.5, 100)), len(val_lines))
+        row_height = max(24, row_lines * 10 + 10)
+        if y - row_height < 57:
+            y = continue_panel_fn("Checklist 3: Stamp-Duty Assessment (continued)")
+        y = _draw_field_row(
+            report_canvas,
+            x,
+            y,
+            max_width,
+            font_name,
+            label,
+            val_lines,
+            is_missing_or_bad,
+        )
+
+    return y
+
+
 def _draw_report_page(
     report_canvas: canvas.Canvas,
     ocr_layout_image: Image.Image,
@@ -489,6 +745,7 @@ def _draw_report_page(
     page_category: str,
     page_error: str | None,
     font_name: str,
+    assessment: Any = None,
 ) -> None:
     panel_x = PAGE_MARGIN * 2 + OCR_LAYOUT_MAX_WIDTH
     page_width = panel_x + PANEL_WIDTH + PAGE_MARGIN
@@ -555,7 +812,7 @@ def _draw_report_page(
         y -= 22
     else:
         for label, value, missing in fields_to_draw:
-            value_lines = _wrap(value, font_name, 7.5, max_width - 112)
+            value_lines = _wrap(value, font_name, 7.5, max_width - 120)
             for offset in range(0, len(value_lines), MAX_FIELD_LINES_PER_SHEET):
                 value_chunk = value_lines[offset:offset + MAX_FIELD_LINES_PER_SHEET]
                 displayed_label = label if offset == 0 else f"{label} (continued)"
@@ -576,6 +833,17 @@ def _draw_report_page(
                     value_chunk,
                     missing,
                 )
+
+    if assessment is not None:
+        y = _draw_stamp_duty_assessment(
+            report_canvas,
+            assessment,
+            x,
+            y,
+            max_width,
+            font_name,
+            continue_panel,
+        )
 
     if page_error:
         if y - 30 < 57:
@@ -648,7 +916,10 @@ def build_ingestion_report(db: Session, ingestion_id: str) -> bytes:
 
     documents = db.scalars(
         select(LogicalDocument)
-        .options(selectinload(LogicalDocument.fields))
+        .options(
+            selectinload(LogicalDocument.fields),
+            selectinload(LogicalDocument.stamp_duty_assessment),
+        )
         .where(LogicalDocument.ingestion_id == ingestion_id)
         .order_by(LogicalDocument.start_page)
     ).all()
@@ -660,7 +931,11 @@ def build_ingestion_report(db: Session, ingestion_id: str) -> bytes:
     pages_by_number = {page.page_number: page for page in pages}
     fields_by_page: dict[int, list[Any]] = {}
     categories_by_page: dict[int, str] = {}
+    assessments_by_page: dict[int, Any] = {}
     for document in documents:
+        if document.stamp_duty_assessment:
+            target_ass_page = document.start_page if 1 <= document.start_page <= source_page_count else 1
+            assessments_by_page[target_ass_page] = document.stamp_duty_assessment
         for page_number in range(document.start_page, document.end_page + 1):
             categories_by_page[page_number] = document.category
         for field in document.fields:
@@ -670,7 +945,27 @@ def build_ingestion_report(db: Session, ingestion_id: str) -> bytes:
                 target_page = document.start_page
             if field not in fields_by_page.setdefault(target_page, []):
                 fields_by_page[target_page].append(field)
-            if field.field_name == "donor_donee_relationship":
+            if field.field_name in (
+                "donor_name",
+                "donee_name",
+                "donor_donee_relationship",
+                "property_type",
+                "property_description",
+                "property_location",
+                "survey_number",
+                "area",
+                "property_area",
+                "market_value",
+                "relationship_value",
+                "relationship_eligibility",
+                "stamp_duty_paid",
+                "metro_cess_paid",
+                "total_stamp_duty_paid",
+                "challan_number",
+                "expected_stamp_duty",
+                "stamp_duty_difference",
+                "stamp_duty_status",
+            ):
                 for doc_page in range(document.start_page, document.end_page + 1):
                     if doc_page != target_page:
                         if field not in fields_by_page.setdefault(doc_page, []):
@@ -709,6 +1004,7 @@ def build_ingestion_report(db: Session, ingestion_id: str) -> bytes:
             categories_by_page.get(page_number, page.category if page else "unknown"),
             page_error,
             font_name,
+            assessment=assessments_by_page.get(page_number),
         )
         if page_number < source_page_count:
             report_canvas.showPage()

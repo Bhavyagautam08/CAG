@@ -4,6 +4,7 @@ import tempfile
 import io
 import json
 import shutil
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Callable
 
@@ -12,7 +13,20 @@ from pypdf.errors import PdfReadError
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from .config import get_settings
+from .config import (
+    ARTICLE_34_ELIGIBLE_RELATIONSHIPS,
+    ARTICLE_34_INELIGIBLE_RELATIONSHIPS,
+    ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS,
+    ARTICLE_34_RELATIONSHIP_LEXICAL_MAPPINGS,
+    METRO_CESS_JURISDICTIONS,
+    NON_METRO_INDICATORS,
+    STAMP_DUTY_BASE_AMOUNT,
+    STAMP_DUTY_EFFECTIVE_FROM,
+    STAMP_DUTY_LEGAL_REFERENCE,
+    STAMP_DUTY_METRO_CESS_RATE,
+    STAMP_DUTY_RULE_VERSION,
+    get_settings,
+)
 from .ocr import OcrEngineUnavailableError, run_ocr
 from .pdf_utils import LocalImageBundle, LocalPdf
 from .models import (
@@ -28,6 +42,7 @@ from .models import (
     Person,
     ProcessingJob,
     PropertyRecord,
+    StampDutyAssessment,
     ValidationFinding,
 )
 
@@ -218,6 +233,11 @@ DONOR_DONEE_RELATIONSHIP_TERMS: dict[str, tuple[str, str]] = {
     "niece": ("Uncle and Niece", "uncle and niece"),
     "uncle": ("Uncle and Nephew", "uncle and nephew"),
     "aunt": ("Aunt and Nephew", "aunt and nephew"),
+    "cousin": ("Cousin", "cousin"),
+    "cousin brother": ("Cousin", "cousin"),
+    "cousin sister": ("Cousin", "cousin"),
+    "real brother": ("Brothers", "brothers"),
+    "real sister": ("Brother and Sister", "brother and sister"),
     "daughter-in-law": ("Parent-in-law and Daughter-in-law", "daughter-in-law"),
     "son-in-law": ("Parent-in-law and Son-in-law", "son-in-law"),
 
@@ -310,7 +330,12 @@ DONOR_DONEE_RELATIONSHIP_TERMS: dict[str, tuple[str, str]] = {
     "आजोबा": ("आजोबा आणि नातू", "grandfather and grandson"),
     "नातू": ("आजोबा आणि नातू", "grandfather and grandson"),
     "नात": ("आजोबा आणि नात", "grandfather and granddaughter"),
+    "काका": ("काका आणि पुतण्या", "uncle and nephew"),
+    "मामा": ("मामा आणि भाचा", "uncle and nephew"),
+    "चाचा": ("चाचा और भतीजा", "uncle and nephew"),
     "पुतण्या": ("काका आणि पुतण्या", "uncle and nephew"),
+    "भाचा": ("मामा आणि भाचा", "uncle and nephew"),
+    "भतीजा": ("चाचा और भतीजा", "uncle and nephew"),
     "सून": ("सासरा आणि सून", "daughter-in-law"),
 }
 
@@ -325,8 +350,8 @@ DONOR_DONEE_EXPLICIT_PATTERNS = [
     # Mutual / explicit relationship phrase (English)
     r"\b(?:related\s+as|relationship\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*[:：is]*)\s*(father\s+and\s+son|father\s+and\s+daughter|mother\s+and\s+son|mother\s+and\s+daughter|brother\s+and\s+sister|brothers|sisters|husband\s+and\s+wife|father-son|father-daughter|mother-son|mother-daughter|brother-sister|husband-wife)\b",
     r"\b(?:parties\s+(?:hereto\s+)?(?:are\s+)?(?:related\s+as\s+)?|are\s+)(brothers|sisters|husband\s+and\s+wife|father\s+and\s+son)\b",
-    r"\b(?:the\s+)?donor\s+(?:is|being)\s+(?:the\s+)?(father|mother|brother|sister|husband|wife|grandfather|grandmother|uncle|aunt)\s+of\s+(?:the\s+)?(?:donee|recipient)\b",
-    r"\b(?:the\s+)?donee\s+(?:is|being)\s+(?:the\s+)?(son|daughter|brother|sister|wife|husband|grandson|granddaughter|nephew|niece)\s+of\s+(?:the\s+)?(?:donor|transferor)\b",
+    r"\b(?:the\s+)?donor\s+(?:is|being|referenced\s+as|is\s+also\s+referenced\s+as)\s+(?:the\s+)?(?:real\s+|full\s+|blood\s+|elder\s+|younger\s+)?(cousin\s+brother|cousin\s+sister|cousin|father|mother|son|daughter|brother|sister|husband|wife|grandfather|grandmother|grandson|granddaughter|uncle|aunt|nephew|niece)\s+of\s+(?:the\s+)?(?:donee|recipient)\b",
+    r"\b(?:the\s+)?donee\s+(?:is|being|referenced\s+as|is\s+also\s+referenced\s+as)\s+(?:the\s+)?(?:real\s+|full\s+|blood\s+|elder\s+|younger\s+)?(cousin\s+brother|cousin\s+sister|cousin|father|mother|son|daughter|brother|sister|wife|husband|grandfather|grandmother|grandson|granddaughter|nephew|niece)\s+of\s+(?:the\s+)?(?:donor|transferor)\b",
     r"\bout\s+of\s+(?:natural\s+)?love\s+and\s+affection\s+(?:for|towards)\s+(?:(?:his|her|the\s+donor'?s)\s+)?(son|daughter|brother|sister|wife|husband|mother|father|grandson|granddaughter|nephew|niece)\b",
     r"\b(?:donor|donee)\s*[:：.-]\s*[^,\n()]+\((father|mother|son|daughter|brother|sister|husband|wife|grandson|granddaughter)\)",
 
@@ -344,8 +369,8 @@ DONOR_DONEE_EXPLICIT_PATTERNS = [
     r"देणार\s*(?:व|आणि)\s*घेणार\s*(?:हे\s+)?(सख्खे\s+बंधू|भाऊ|पती-पत्नी)",
     r"(?:नातेसंबंध|नाते|संबंध)\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
     r"देणाराचे\s+घेणाऱ्याशी\s+नाते\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
-    r"देणार[ाी]?\s+(?:हा\s+|ही\s+)?घेणाऱ्याच[ाीे]?\s*(वडील|पिता|आई|माता|भाऊ|बहीण|पती|पत्नी|आजोबा|आजी)\s*(?:आहे|असून|असल्याने)",
-    r"घेणार[ाी]?\s+(?:हा\s+|ही\s+)?देणाऱ्याच[ाीे]?\s*(मुलगा|मुलगी|पुत्र|कन्या|चिरंजीव|सुपुत्र|सुकन्या|भाऊ|बहीण|पत्नी|पती|नातू|नात)\s*(?:आहे|असून|असल्याने)",
+    r"देणार[ाी]?\s*(?:हा\s+|ही\s+)?(?:घेणाऱ्या|घेणारा)च[ाीे]?\s*(वडील|पिता|आई|माता|भाऊ|बहीण|पती|पत्नी|आजोबा|आजी|काका|मामा|चाचा|आत्या|मावशी)\s*(?:आहे|असून|असल्याने)",
+    r"घेणार[ाी]?\s*(?:हा\s+|ही\s+)?(?:देणाऱ्या|देणारा)च[ाीे]?\s*(मुलगा|मुलगी|पुत्र|कन्या|चिरंजीव|सुपुत्र|सुकन्या|भाऊ|बहीण|पत्नी|पती|नातू|नात|पुतण्या|भाचा|भतीजा|भांजा)\s*(?:आहे|असून|असल्याने)",
     r"(?:नैसर्गिक|स्वाभाविक)\s+(?:प्रेम\s*(?:व|आणि)\s*जिव्हाळा|प्रेम|जिव्हाळा|लोभ|ममते)(?:पोटी|मुळे|खातर)\s+(?:आपल[ाीे]|त्यांच[ाीे])?\s*(मुलगा|मुलगी|पुत्र|कन्या|चिरंजीव|सुपुत्र|सुकन्या|भाऊ|बहीण|पत्नी|पती|नातू|नात)",
     r"देणार\s*[:：-]?\s*[^,\n()]+\((वडील|आई|भाऊ|बहीण|पती|पत्नी)\)",
     r"घेणार\s*[:：-]?\s*[^,\n()]+\((मुलगा|मुलगी|भाऊ|बहीण|पत्नी|पती)\)",
@@ -380,6 +405,8 @@ def extract_donor_donee_relationship(
     Returns: (extracted_value, normalized_value, evidence_sentence, source_page, is_ambiguous)
     If no explicit relationship is stated, returns extracted_value='not_available'.
     """
+    if isinstance(text_by_page, str):
+        text_by_page = [(1, text_by_page)]
     default_page = text_by_page[0][0] if text_by_page else 1
     found_candidates: list[tuple[str, str, str, int, bool]] = []
 
@@ -456,6 +483,831 @@ def extract_donor_donee_relationship(
         return non_vague[0]
 
     return found_candidates[0]
+
+
+DEVANAGARI_DIGITS_MAP = str.maketrans("०१२३४५६७८९", "0123456789")
+
+
+def parse_indian_currency_amount(raw_text: str | None) -> int | None:
+    """
+    Translates Devanagari digits (०-९) to ASCII (0-9) and extracts numeric rupee amount.
+    Supports formats: ₹25,00,000, ₹ 25,00,000/-, Rs. 25,00,000, Rs 2500000,
+    INR 25,00,000.00, रु. १५,००,०००/-, रुपये २५,००,०००.
+    Strips commas and trailing .00 / /-, returning integer rupees.
+    """
+    if not raw_text:
+        return None
+    translated = str(raw_text).translate(DEVANAGARI_DIGITS_MAP)
+    m = re.search(
+        r"(?:₹|Rs\.?|INR|रु\.?|रुपये)\s*([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:/-)?",
+        translated,
+        re.IGNORECASE,
+    )
+    if not m:
+        m = re.search(r"([0-9][0-9,]*(?:\.\d{1,2})?)\s*/-", translated)
+    if not m:
+        m = re.search(r"\b([0-9][0-9,]*(?:\.\d{1,2})?)\b", translated)
+    if not m:
+        return None
+    num_str = m.group(1).replace(",", "").strip()
+    if not num_str:
+        return None
+    try:
+        val = Decimal(num_str)
+        return int(val.to_integral_value(rounding=ROUND_HALF_UP))
+    except (ValueError, ArithmeticError):
+        return None
+
+
+AGRICULTURAL_PRIMARY_TERMS: tuple[str, ...] = (
+    "agricultural land", "agriculture land", "agricultural property",
+    "farm land", "cultivable land", "dry land", "irrigated land",
+    "शेती जमीन", "कृषी जमीन", "शेत जमीन", "बागायत जमीन", "जिरायत जमीन",
+)
+
+AGRICULTURAL_SUPPORTING_INDICATORS: tuple[str, ...] = (
+    "survey number", "gat number", "7/12 extract", "crop area",
+    "kharif", "rabi", "जमीन", "गट क्रमांक", "सातबारा", "पिकाखाली क्षेत्र", "सर्व्हे नंबर",
+)
+
+RESIDENTIAL_PRIMARY_TERMS: tuple[str, ...] = (
+    "residential property", "residential premises", "residential flat",
+    "flat", "apartment", "house", "bungalow", "row house", "dwelling", "tenement",
+    "घर", "निवासी", "फ्लॅट", "अपार्टमेंट", "सदनिका", "बंगला",
+)
+
+OTHER_PROPERTY_TERMS: tuple[str, ...] = (
+    "commercial", "office", "shop", "industrial", "warehouse",
+    "कार्यालय", "दुकान", "व्यावसायिक", "गाळा", "गोदाम",
+)
+
+SCHEDULE_HEADER_PATTERNS = [
+    r"(?:\bschedule\s*(?:of\s*(?:the\s*)?property)?\b|परिशिष्ट|मिळकतीचे\s*वर्णन|मिळकत\s*वर्णन|चतुःसीमा|description\s+of\s+(?:the\s+)?property)",
+]
+
+MARKET_VALUE_PATTERNS = [
+    r"(?:\bmarket\s*value(?:\s*of\s*(?:the\s*)?property)?\b|\bready\s*reckoner\s*value\b|\breckoner\s*value\b|\bgovernment\s*valuation\b|\bvaluation(?:\s*amount|\s*value)?\b|\bvalue\s*of\s*(?:the\s*)?property\b|बाजार\s*मूल्य|बाजारभाव|मूल्यांकन\s*मूल्य|मूल्यांकन\s*रक्कम|रेडी\s*रेकनर\s*मूल्य)(?:\s+is\s*|\s*[:：=-]?\s*)[^0-9०-९\n]*?([0-9०-९][0-9०-९,]*(?:\.\d{1,2})?(?:\s*/-)?)"
+]
+
+ASSESSED_VALUE_PATTERNS = [
+    r"(?:\bassessed\s*value\b|\bvaluation\s*amount\b|\btax\s*assessment\s*value\b|कर\s*आकारणी\s*मूल्य|मूल्यांकन\s*राशि)(?:\s+is\s*|\s*[:：=-]?\s*)[^0-9०-९\n]*?([0-9०-९][0-9०-९,]*(?:\.\d{1,2})?(?:\s*/-)?)"
+]
+
+TOTAL_STAMP_DUTY_PATTERNS = [
+    r"(?:\btotal\s*stamp\s*duty(?:\s*paid)?\b|\btotal\s*duty\s*paid\b|एकूण\s*मुद्रांक\s*शुल्क|एकूण\s*शुल्क)(?:\s+is\s*|\s*[:：=-]?\s*)[^0-9०-९\n]*?([0-9०-९][0-9०-९,]*(?:\.\d{1,2})?(?:\s*/-)?)"
+]
+
+METRO_CESS_PATTERNS = [
+    r"(?:\bMumbai\s*Metro\s*Cess(?:\s*paid)?\b|\bmetro\s*cess(?:\s*paid)?\b|\bmetro-cess(?:\s*paid)?\b|मेट्रो\s*सेस(?:\s*भरले)?|अधिभार|\bcess(?:\s*paid)?\b)(?:\s+is\s*|\s*[:：=-]?\s*)[^0-9०-९\n]*?([0-9०-९][0-9०-९,]*(?:\.\d{1,2})?(?:\s*/-)?)"
+]
+
+BASE_STAMP_DUTY_PATTERNS = [
+    r"(?<!total\s)(?<!एकूण\s)(?:\bstamp\s*duty\s*paid\b|\bduty\s*paid\b|\bstamp\s*duty\b|\bduty\s*payable\b|\bSD\b|भरलेले\s*मुद्रांक\s*शुल्क|मुद्रांक\s*शुल्क|stamp\s*शुल्क)(?:\s+is\s*|\s*[:：=-]?\s*)[^0-9०-९\n]*?([0-9०-९][0-9०-९,]*(?:\.\d{1,2})?(?:\s*/-)?)"
+]
+
+CHALLAN_PATTERNS = [
+    r"(?:\bchallan\s*(?:no\.?|number)\b|\be-sbtr\s*(?:no\.?|number)?\b|\bGRN\b|चलन\s*क्रमांक|चालान\s*(?:क्रमांक|संख्या|no\.?|number)?)(?:\s+is\s*|\s*[:：=-]?\s*)([A-Z0-9][A-Z0-9/-]{3,})"
+]
+
+
+def extract_property_schedule(
+    text_by_page: list[tuple[int, str]],
+) -> tuple[str, str | None, str | None, str | None, str | None, int | None, bool, str, int]:
+    """
+    Scans page texts for Schedule of Property and recital descriptions.
+    Returns:
+    (property_type, property_description, property_location, survey_number, area, market_value, is_ambiguous_property_type, evidence, source_page)
+    """
+    if isinstance(text_by_page, str):
+        text_by_page = [(1, text_by_page)]
+    default_page = text_by_page[0][0] if text_by_page else 1
+    agri_matches: list[tuple[int, str, str]] = []
+    res_matches: list[tuple[int, str, str]] = []
+    other_matches: list[tuple[int, str, str]] = []
+    supporting_agri_matches: list[tuple[int, str, str]] = []
+
+    descriptions: list[tuple[int, str]] = []
+    locations: list[tuple[int, str]] = []
+    survey_numbers: list[tuple[int, str]] = []
+    areas: list[tuple[int, str]] = []
+    market_values: list[tuple[int, int, str]] = []
+
+    for page_num, text in text_by_page:
+        lines = text.splitlines()
+        for idx, line in enumerate(lines):
+            line_str = line.strip()
+            if not line_str:
+                continue
+            line_cf = line_str.casefold()
+
+            is_header = any(re.search(pat, line_str, re.IGNORECASE) for pat in SCHEDULE_HEADER_PATTERNS)
+            if is_header:
+                desc_snippet = " ".join(lines[idx:idx+4]).strip()
+                if desc_snippet:
+                    descriptions.append((page_num, desc_snippet[:500]))
+
+            for term in AGRICULTURAL_PRIMARY_TERMS:
+                if term in line_cf:
+                    agri_matches.append((page_num, term, line_str))
+
+            for term in RESIDENTIAL_PRIMARY_TERMS:
+                pattern = rf"\b{re.escape(term)}\b" if len(term) < 6 and term.isascii() else re.escape(term)
+                if re.search(pattern, line_cf):
+                    res_matches.append((page_num, term, line_str))
+
+            for term in OTHER_PROPERTY_TERMS:
+                pattern = rf"\b{re.escape(term)}\b" if len(term) < 6 and term.isascii() else re.escape(term)
+                if re.search(pattern, line_cf):
+                    other_matches.append((page_num, term, line_str))
+
+            for term in AGRICULTURAL_SUPPORTING_INDICATORS:
+                if term in line_cf:
+                    supporting_agri_matches.append((page_num, term, line_str))
+
+            survey_match = re.search(
+                r"(?:\bsurvey\s*(?:no\.?|number)?|\bgat\s*(?:no\.?|number)?|गट\s*क्रमांक|गा\.?\s*नं\.?|ग\.\s*नं\.?|सर्व्हे\s*(?:नंबर|नं\.?))\s*[:#-]?\s*([A-Z0-9०-९][A-Z0-9०-९/-]*)",
+                line_str,
+                re.IGNORECASE,
+            ) or re.search(FIELD_PATTERNS["survey_number"], line_str, re.IGNORECASE)
+            if survey_match:
+                survey_numbers.append((page_num, survey_match.group(1).strip()))
+
+            area_match = re.search(FIELD_PATTERNS["property_area"], line_str, re.IGNORECASE)
+            if area_match:
+                areas.append((page_num, area_match.group(1).strip()))
+
+            loc_match = re.search(
+                r"(?:at\s+village|village|taluka|district|मौजे|गाव|तालुका|जिल्हा)\s*[:：-]?\s*([A-Za-z\u0900-\u097F\s,.-]{3,60})",
+                line_str,
+                re.IGNORECASE,
+            )
+            if loc_match:
+                locations.append((page_num, loc_match.group(0).strip()[:200]))
+
+            for mv_pat in MARKET_VALUE_PATTERNS:
+                mvm = re.search(mv_pat, line_str, re.IGNORECASE)
+                if mvm:
+                    amt = parse_indian_currency_amount(mvm.group(1))
+                    if amt:
+                        market_values.append((page_num, amt, line_str[:300]))
+
+    has_agri = len(agri_matches) > 0
+    has_res = len(res_matches) > 0
+    has_other = len(other_matches) > 0
+
+    if has_agri and has_res:
+        property_type = "unknown"
+        is_ambiguous = True
+        evidence = f"Mixed primary terms: Agri ({[m[1] for m in agri_matches]}) and Res ({[m[1] for m in res_matches]})"
+        source_page = agri_matches[0][0]
+    elif has_agri:
+        property_type = "agricultural_land"
+        is_ambiguous = False
+        evidence = f"Agricultural primary terms: {[m[1] for m in agri_matches]}; evidence: {agri_matches[0][2][:300]}"
+        source_page = agri_matches[0][0]
+    elif has_res:
+        property_type = "residential_property"
+        is_ambiguous = False
+        evidence = f"Residential primary terms: {[m[1] for m in res_matches]}; evidence: {res_matches[0][2][:300]}"
+        source_page = res_matches[0][0]
+    elif has_other:
+        property_type = "other_property"
+        is_ambiguous = False
+        evidence = f"Other property terms: {[m[1] for m in other_matches]}; evidence: {other_matches[0][2][:300]}"
+        source_page = other_matches[0][0]
+    elif supporting_agri_matches:
+        property_type = "unknown"
+        is_ambiguous = False
+        evidence = f"Supporting indicators only (survey/gat without primary terms): {[m[1] for m in supporting_agri_matches]}"
+        source_page = supporting_agri_matches[0][0]
+    else:
+        property_type = "unknown"
+        is_ambiguous = False
+        evidence = "No property terms found in schedule or recitals"
+        source_page = default_page
+
+    prop_desc = descriptions[0][1] if descriptions else (agri_matches[0][2] if agri_matches else (res_matches[0][2] if res_matches else None))
+    prop_loc = locations[0][1] if locations else None
+    surv_no = survey_numbers[0][1] if survey_numbers else None
+    prop_area = areas[0][1] if areas else None
+    mv = market_values[0][1] if market_values else None
+
+    return (property_type, prop_desc, prop_loc, surv_no, prop_area, mv, is_ambiguous, evidence, source_page)
+
+
+def extract_market_value(
+    text_by_page: list[tuple[int, str]],
+) -> tuple[int | None, bool, str, int, bool]:
+    """
+    Extracts market value across pages.
+    Returns:
+    (market_value, has_conflicting_market_values, evidence, source_page, is_assessed_fallback)
+    """
+    if isinstance(text_by_page, str):
+        text_by_page = [(1, text_by_page)]
+    default_page = text_by_page[0][0] if text_by_page else 1
+    mv_candidates: list[tuple[int, str, str, int]] = []
+    assessed_candidates: list[tuple[int, str, str, int]] = []
+
+    for page_num, text in text_by_page:
+        for line in text.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            for pat in MARKET_VALUE_PATTERNS:
+                m = re.search(pat, line_str, re.IGNORECASE)
+                if m:
+                    raw_val = m.group(1).strip()
+                    parsed = parse_indian_currency_amount(raw_val)
+                    if parsed is not None:
+                        mv_candidates.append((page_num, line_str[:500], raw_val, parsed))
+            for pat in ASSESSED_VALUE_PATTERNS:
+                m = re.search(pat, line_str, re.IGNORECASE)
+                if m:
+                    raw_val = m.group(1).strip()
+                    parsed = parse_indian_currency_amount(raw_val)
+                    if parsed is not None:
+                        assessed_candidates.append((page_num, line_str[:500], raw_val, parsed))
+
+    if mv_candidates:
+        distinct_amounts = {c[3] for c in mv_candidates}
+        if len(distinct_amounts) > 1:
+            ev = "Conflicting market values: " + "; ".join(f"Page {c[0]}: {c[1]}" for c in mv_candidates)
+            return None, True, ev, mv_candidates[0][0], False
+        return mv_candidates[0][3], False, mv_candidates[0][1], mv_candidates[0][0], False
+
+    if assessed_candidates:
+        ev = "assessed_value_fallback_only: " + "; ".join(f"Page {c[0]}: {c[1]}" for c in assessed_candidates)
+        return None, False, ev, assessed_candidates[0][0], True
+
+    return None, False, "No market value found in deed text", default_page, False
+
+
+def evaluate_article_34_relationship(
+    text_by_page: list[tuple[int, str]],
+    donor_name: str | None = None,
+    donee_name: str | None = None,
+) -> tuple[str | None, str | None, str, int, str, bool]:
+    """
+    Evaluates Article 34 relationship eligibility.
+    Returns:
+    (relationship_value, relationship_normalized, relationship_eligibility, source_page, evidence, is_ambiguous)
+    Where relationship_eligibility is 'eligible' | 'not_eligible' | 'unknown' | 'ambiguous'.
+    """
+    rel_val, rel_norm, rel_ev, rel_page, is_amb = extract_donor_donee_relationship(
+        text_by_page, donor_name=donor_name, donee_name=donee_name
+    )
+
+    if rel_val == "not_available" or not rel_norm:
+        return None, None, "unknown", rel_page, rel_ev, False
+
+    if is_amb or rel_norm == "ambiguous" or rel_norm in ("near relatives", "relative"):
+        return rel_val, "ambiguous", "ambiguous", rel_page, rel_ev, True
+
+    norm_clean = rel_norm.casefold().strip().replace("-", "_").replace(" ", "_")
+    mapped = ARTICLE_34_RELATIONSHIP_LEXICAL_MAPPINGS.get(rel_norm.casefold().strip(), norm_clean)
+    mapped_clean = mapped.casefold().strip().replace("-", "_").replace(" ", "_")
+
+    is_eligible = (
+        mapped_clean in ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS
+        or norm_clean in ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS
+        or rel_norm.casefold() in [k.casefold() for k in ARTICLE_34_ELIGIBLE_RELATIONSHIPS]
+    )
+
+    is_ineligible = (
+        mapped_clean in [k.replace("-", "_").replace(" ", "_").casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS]
+        or norm_clean in [k.replace("-", "_").replace(" ", "_").casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS]
+        or rel_norm.casefold() in [k.casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS]
+    )
+
+    if is_eligible and not is_ineligible:
+        return rel_val, mapped_clean, "eligible", rel_page, rel_ev, False
+    elif is_ineligible:
+        return rel_val, mapped_clean, "not_eligible", rel_page, rel_ev, False
+    else:
+        return rel_val, mapped_clean, "not_eligible", rel_page, rel_ev, False
+
+
+def extract_stamp_duty_paid(
+    text_by_page: list[tuple[int, str]],
+) -> tuple[int | None, int | None, int | None, str | None, bool, str, int]:
+    """
+    Extracts stamp duty paid, metro cess paid, total paid, and challan number across pages.
+    Returns:
+    (stamp_duty_paid, metro_cess_paid, total_stamp_duty_paid, challan_number, has_conflicting_stamp_duty, evidence, source_page)
+    """
+    if isinstance(text_by_page, str):
+        text_by_page = [(1, text_by_page)]
+    default_page = text_by_page[0][0] if text_by_page else 1
+    base_duty_candidates: list[tuple[int, str, str, int]] = []
+    metro_cess_candidates: list[tuple[int, str, str, int]] = []
+    total_duty_candidates: list[tuple[int, str, str, int]] = []
+    challan_candidates: list[tuple[int, str, str]] = []
+
+    for page_num, text in text_by_page:
+        for line in text.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+
+            for pat in TOTAL_STAMP_DUTY_PATTERNS:
+                m = re.search(pat, line_str, re.IGNORECASE)
+                if m:
+                    parsed = parse_indian_currency_amount(m.group(1))
+                    if parsed is not None:
+                        total_duty_candidates.append((page_num, line_str[:500], m.group(1).strip(), parsed))
+
+            for pat in METRO_CESS_PATTERNS:
+                m = re.search(pat, line_str, re.IGNORECASE)
+                if m:
+                    parsed = parse_indian_currency_amount(m.group(1))
+                    if parsed is not None:
+                        metro_cess_candidates.append((page_num, line_str[:500], m.group(1).strip(), parsed))
+
+            if not any(re.search(p, line_str, re.IGNORECASE) for p in TOTAL_STAMP_DUTY_PATTERNS):
+                for pat in BASE_STAMP_DUTY_PATTERNS:
+                    m = re.search(pat, line_str, re.IGNORECASE)
+                    if m:
+                        parsed = parse_indian_currency_amount(m.group(1))
+                        if parsed is not None:
+                            base_duty_candidates.append((page_num, line_str[:500], m.group(1).strip(), parsed))
+
+            for pat in CHALLAN_PATTERNS:
+                m = re.search(pat, line_str, re.IGNORECASE)
+                if m:
+                    challan_candidates.append((page_num, line_str[:500], m.group(1).strip()))
+
+    has_conflicts = False
+    distinct_base = {c[3] for c in base_duty_candidates}
+    distinct_total = {c[3] for c in total_duty_candidates}
+    if len(distinct_base) > 1 or len(distinct_total) > 1:
+        has_conflicts = True
+
+    base_paid = base_duty_candidates[0][3] if base_duty_candidates else None
+    metro_paid = metro_cess_candidates[0][3] if metro_cess_candidates else None
+
+    if total_duty_candidates:
+        total_paid = total_duty_candidates[0][3]
+    elif base_paid is not None or metro_paid is not None:
+        total_paid = (base_paid or 0) + (metro_paid or 0)
+    else:
+        total_paid = None
+
+    challan_no = challan_candidates[0][2] if challan_candidates else None
+
+    ev_parts = []
+    if total_duty_candidates:
+        ev_parts.append(f"Total Paid: {total_duty_candidates[0][1]}")
+    if base_duty_candidates:
+        ev_parts.append(f"Duty: {base_duty_candidates[0][1]}")
+    if metro_cess_candidates:
+        ev_parts.append(f"Metro Cess: {metro_cess_candidates[0][1]}")
+    if challan_candidates:
+        ev_parts.append(f"Challan: {challan_candidates[0][1]}")
+    evidence = "; ".join(ev_parts) if ev_parts else "No stamp duty payment extracted"
+
+    page = default_page
+    for cand_list in (total_duty_candidates, base_duty_candidates, metro_cess_candidates, challan_candidates):
+        if cand_list:
+            page = cand_list[0][0]
+            break
+
+    return (base_paid, metro_paid, total_paid, challan_no, has_conflicts, evidence, page)
+
+
+def assess_stamp_duty_article_34(
+    document: LogicalDocument,
+    text_by_page: list[tuple[int, str]],
+    all_pages: list[Page] | None = None,
+    db: Session | None = None,
+) -> StampDutyAssessment:
+    """
+    Performs Article 34 Stamp Duty assessment for Maharashtra gift deeds.
+    Calculates expected stamp duty and metro cess using Decimal ROUND_HALF_UP.
+    Persists/updates StampDutyAssessment and generates ValidationFindings.
+    """
+    donor_name = next((f.extracted_value for f in document.fields if f.field_name == "donor_name"), None)
+    donee_name = next((f.extracted_value for f in document.fields if f.field_name == "donee_name"), None)
+
+    rel_val, rel_norm, rel_elig, rel_page, rel_ev, rel_is_amb = evaluate_article_34_relationship(
+        text_by_page, donor_name=donor_name, donee_name=donee_name
+    )
+    if rel_elig == "unknown" and all_pages:
+        all_text_by_page = [
+            (p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "")
+            for p in all_pages
+        ]
+        fb_val, fb_norm, fb_elig, fb_page, fb_ev, fb_amb = evaluate_article_34_relationship(
+            all_text_by_page, donor_name=donor_name, donee_name=donee_name
+        )
+        if fb_elig != "unknown":
+            rel_val, rel_norm, rel_elig, rel_page, rel_ev, rel_is_amb = fb_val, fb_norm, fb_elig, fb_page, fb_ev, fb_amb
+
+    prop_type, prop_desc, prop_loc, surv_no, prop_area, sched_mv, prop_is_amb, prop_ev, prop_page = (
+        extract_property_schedule(text_by_page)
+    )
+    if prop_type == "unknown" and not prop_is_amb and all_pages:
+        all_text_by_page = [
+            (p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "")
+            for p in all_pages
+        ]
+        fb_type, fb_desc, fb_loc, fb_surv, fb_area, fb_mv, fb_amb, fb_ev, fb_page = extract_property_schedule(
+            all_text_by_page
+        )
+        if fb_type != "unknown" or fb_amb:
+            prop_type, prop_desc, prop_loc, surv_no, prop_area, sched_mv, prop_is_amb, prop_ev, prop_page = (
+                fb_type, fb_desc, fb_loc, fb_surv, fb_area, fb_mv, fb_amb, fb_ev, fb_page
+            )
+
+    mv, has_conflicting_mv, mv_ev, mv_page, mv_is_assessed_fallback = extract_market_value(text_by_page)
+    if mv is None and not has_conflicting_mv and all_pages:
+        all_text_by_page = [
+            (p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "")
+            for p in all_pages
+        ]
+        fb_mv, fb_conf_mv, fb_mv_ev, fb_mv_page, fb_fallback = extract_market_value(all_text_by_page)
+        if fb_mv is not None or fb_conf_mv:
+            mv, has_conflicting_mv, mv_ev, mv_page, mv_is_assessed_fallback = fb_mv, fb_conf_mv, fb_mv_ev, fb_mv_page, fb_fallback
+    if mv is None and sched_mv is not None and not has_conflicting_mv:
+        mv = sched_mv
+
+    combined_text = " ".join(t for _, t in text_by_page).casefold()
+    loc_text = (prop_loc or "").casefold()
+
+    is_non_metro = any(ind in loc_text or ind in combined_text for ind in NON_METRO_INDICATORS)
+    is_metro = any(j in loc_text or j in combined_text for j in METRO_CESS_JURISDICTIONS)
+
+    if prop_type == "agricultural_land":
+        jurisdiction = "non_metro" if is_non_metro else ("metro" if is_metro else "non_metro")
+        is_metro_cess_applicable = False
+    elif is_non_metro:
+        jurisdiction = "non_metro"
+        is_metro_cess_applicable = False
+    elif is_metro:
+        jurisdiction = "metro"
+        is_metro_cess_applicable = True
+    else:
+        jurisdiction = "unknown"
+        is_metro_cess_applicable = False
+
+    base_paid, metro_paid, total_paid, challan_no, has_conflicting_duty, duty_ev, duty_page = (
+        extract_stamp_duty_paid(text_by_page)
+    )
+    if total_paid is None and all_pages:
+        all_text_by_page = [
+            (p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "")
+            for p in all_pages
+        ]
+        fb_base, fb_metro, fb_total, fb_ch, fb_conf_duty, fb_duty_ev, fb_duty_page = extract_stamp_duty_paid(
+            all_text_by_page
+        )
+        if fb_total is not None or fb_conf_duty:
+            base_paid, metro_paid, total_paid, challan_no, has_conflicting_duty, duty_ev, duty_page = (
+                fb_base, fb_metro, fb_total, fb_ch, fb_conf_duty, fb_duty_ev, fb_duty_page
+            )
+
+    base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+    metro_cess_rate = float(STAMP_DUTY_METRO_CESS_RATE) if is_metro_cess_applicable else 0.0
+    metro_cess_amount: int | None = None
+    expected_total: int | None = None
+    difference: int | None = None
+    status = "requires_review"
+    status_reason = ""
+
+    if rel_elig == "not_eligible" or prop_type == "other_property":
+        status = "not_applicable"
+        status_reason = (
+            f"Article 34 concessional rate is not applicable: "
+            f"Relationship '{rel_val}' (eligibility: {rel_elig}) or Property Type '{prop_type}' "
+            "does not qualify for family gift deed concession. Standard conveyance stamp duty applies."
+        )
+        base_duty = None
+        metro_cess_rate = None
+        metro_cess_amount = None
+        expected_total = None
+        difference = None
+    elif rel_is_amb or prop_is_amb or has_conflicting_mv or has_conflicting_duty:
+        status = "requires_review"
+        reasons = []
+        if rel_is_amb:
+            reasons.append(f"Ambiguous relationship in recital: {rel_val}")
+        if prop_is_amb:
+            reasons.append("Ambiguous / mixed property type in schedule")
+        if has_conflicting_mv:
+            reasons.append("Conflicting market values extracted across pages")
+        if has_conflicting_duty:
+            reasons.append("Conflicting stamp duty paid amounts across pages")
+        status_reason = "; ".join(reasons)
+        if mv is not None and not has_conflicting_mv:
+            metro_cess = (Decimal(mv) * Decimal(str(metro_cess_rate))).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            metro_cess_amount = int(metro_cess)
+            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
+    elif rel_elig == "unknown":
+        status = "not_available"
+        status_reason = "No explicit donor-donee relationship found in recital text. Article 34 eligibility cannot be confirmed."
+    elif prop_type == "unknown":
+        status = "requires_review"
+        status_reason = "Property type in Schedule of Property could not be classified as residential or agricultural."
+        if mv is not None:
+            metro_cess = (Decimal(mv) * Decimal(str(metro_cess_rate))).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            metro_cess_amount = int(metro_cess)
+            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
+    elif jurisdiction == "unknown" and prop_type != "agricultural_land":
+        status = "requires_review"
+        status_reason = "Metro Cess jurisdiction could not be determined from property location. Review whether metro cess applies."
+        if mv is not None:
+            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            metro_cess_amount = int(metro_cess)
+            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
+    elif mv is None:
+        status = "not_available"
+        status_reason = "Declared market value was not found in the property schedule or recitals. Required to calculate stamp duty and metro cess."
+    elif total_paid is None:
+        if is_metro_cess_applicable:
+            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            metro_cess_amount = int(metro_cess)
+            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
+        else:
+            metro_cess_amount = 0
+            expected_total = int(STAMP_DUTY_BASE_AMOUNT)
+        status = "not_available"
+        status_reason = f"Expected total duty ₹{expected_total:,}, but no stamp duty payment was extracted to compare."
+    else:
+        if is_metro_cess_applicable:
+            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            metro_cess_amount = int(metro_cess)
+            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
+        else:
+            metro_cess_amount = 0
+            expected_total = int(STAMP_DUTY_BASE_AMOUNT)
+
+        difference = total_paid - expected_total
+        if difference >= 0:
+            status = "compliant"
+            status_reason = (
+                f"Compliant under Article 34. Paid ₹{total_paid:,} meets or exceeds expected ₹{expected_total:,} "
+                f"(Base: ₹{base_duty} + Metro Cess: ₹{metro_cess_amount:,})."
+            )
+        else:
+            status = "short_paid"
+            status_reason = (
+                f"Short paid under Article 34 by ₹{abs(difference):,}. Expected ₹{expected_total:,} "
+                f"(Base: ₹{base_duty} + Metro Cess: ₹{metro_cess_amount:,}), but actual paid is ₹{total_paid:,}."
+            )
+
+    source_pages_set = {rel_page, prop_page, mv_page, duty_page}
+    source_pages_str = ",".join(str(p) for p in sorted(source_pages_set))
+
+    evidence_summary = (
+        f"Recital: {rel_ev}; Property: {prop_ev}; Valuation: {mv_ev}; Payment: {duty_ev}"
+    )[:2000]
+
+    assessment = None
+    if db:
+        assessment = db.scalar(
+            select(StampDutyAssessment).where(StampDutyAssessment.document_id == document.id)
+        )
+    if assessment is None:
+        assessment = getattr(document, "stamp_duty_assessment", None)
+    if assessment is None:
+        assessment = StampDutyAssessment(document_id=document.id)
+        if db:
+            db.add(assessment)
+
+    assessment.donor_name = donor_name
+    assessment.donee_name = donee_name
+    assessment.relationship = rel_val
+    assessment.relationship_normalized = rel_norm
+    assessment.relationship_eligibility = rel_elig
+    assessment.property_type = prop_type
+    assessment.property_description = prop_desc
+    assessment.property_location = prop_loc
+    assessment.survey_number = surv_no
+    assessment.area = prop_area
+    assessment.jurisdiction = jurisdiction
+    assessment.market_value = mv
+    assessment.base_duty = base_duty
+    assessment.metro_cess_rate = metro_cess_rate
+    assessment.metro_cess_amount = metro_cess_amount
+    assessment.expected_total = expected_total
+    assessment.stamp_duty_paid = base_paid
+    assessment.metro_cess_paid = metro_paid
+    assessment.total_stamp_duty_paid = total_paid
+    assessment.challan_number = challan_no
+    assessment.difference = difference
+    assessment.status = status
+    assessment.legal_rule_version = STAMP_DUTY_RULE_VERSION
+    assessment.evidence = evidence_summary
+    assessment.source_pages = source_pages_str
+    assessment.reviewer_notes = status_reason
+
+    document.stamp_duty_assessment = assessment
+
+    findings_list: list[ValidationFinding] = []
+    case_id = document.case_id or (document.case.id if getattr(document, "case", None) else None)
+
+    if status == "short_paid":
+        for r_id in ("stamp_duty_short_paid", "short_paid_stamp_duty"):
+            findings_list.append(
+                ValidationFinding(
+                    case_id=case_id,
+                    document_id=document.id,
+                    rule_id=r_id,
+                    severity="high",
+                    kind="compliance_deficit",
+                    explanation=status_reason,
+                    evidence=evidence_summary,
+                    source_pages=source_pages_str,
+                )
+            )
+    if has_conflicting_mv or "Conflicting market values" in status_reason:
+        for r_id in ("stamp_duty_calculation_requires_review", "conflicting_market_values"):
+            findings_list.append(
+                ValidationFinding(
+                    case_id=case_id,
+                    document_id=document.id,
+                    rule_id=r_id,
+                    severity="medium",
+                    kind="conflicting_information",
+                    explanation="Conflicting market values were extracted across pages. Review the schedule of property and ready reckoner rate.",
+                    evidence=mv_ev,
+                    source_pages=str(mv_page),
+                )
+            )
+    if prop_is_amb:
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="ambiguous_property_type",
+                severity="medium",
+                kind="classification_ambiguity",
+                explanation="Property type in Schedule of Property is ambiguous or contains mixed residential and agricultural indicators. Concessional Article 34 duty requires manual review.",
+                evidence=prop_ev,
+                source_pages=str(prop_page),
+            )
+        )
+    if prop_type == "unknown" and rel_elig != "not_eligible" and not prop_is_amb:
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="unknown_property_type",
+                severity="medium",
+                kind="classification_ambiguity",
+                explanation="Property type in Schedule of Property could not be classified as residential or agricultural. Concessional Article 34 duty requires manual review.",
+                evidence=prop_ev,
+                source_pages=str(prop_page),
+            )
+        )
+    if rel_elig == "not_eligible":
+        for r_id in ("relationship_not_eligible_article_34", "ineligible_article_34_relationship"):
+            findings_list.append(
+                ValidationFinding(
+                    case_id=case_id,
+                    document_id=document.id,
+                    rule_id=r_id,
+                    severity="medium",
+                    kind="ineligible_concession",
+                    explanation=f"The donor-donee relationship ('{rel_val}') is not eligible for concessional stamp duty under Article 34 of Maharashtra Stamp Act. Standard conveyance duty applies.",
+                    evidence=rel_ev,
+                    source_pages=str(rel_page),
+                )
+            )
+    if rel_elig == "unknown" and document.category == "gift_deed":
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="missing_donor_donee_relationship",
+                severity="low",
+                kind="missing_information",
+                explanation="Expected donor-donee relationship was not explicitly stated in the recital text. Verify against the source document.",
+                source_pages=str(rel_page),
+            )
+        )
+    if rel_is_amb and document.category == "gift_deed":
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="ambiguous_donor_donee_relationship",
+                severity="medium",
+                kind="ambiguous_relationship",
+                explanation=f"The donor-donee relationship in the recital text is ambiguous ({rel_val}). Verify against the source document.",
+                evidence=rel_ev,
+                source_pages=str(rel_page),
+            )
+        )
+    if jurisdiction == "unknown" and rel_elig == "eligible" and prop_type != "agricultural_land":
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="metro_cess_jurisdiction_unknown",
+                severity="medium",
+                kind="jurisdiction_ambiguity",
+                explanation="Metro Cess jurisdiction could not be determined from property location. Verify whether property falls within a municipal corporation / metro area.",
+                evidence=prop_loc or "Location not specified",
+                source_pages=str(prop_page),
+            )
+        )
+    if mv is None and rel_elig == "eligible" and document.category == "gift_deed":
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="missing_market_value",
+                severity="low",
+                kind="missing_information",
+                explanation="Market value / Ready Reckoner value was not found in the property schedule or recitals. Required to calculate metro cess under Article 34.",
+                source_pages=source_pages_str,
+            )
+        )
+    if total_paid is None and rel_elig == "eligible" and document.category == "gift_deed":
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="missing_stamp_duty_paid",
+                severity="low",
+                kind="missing_information",
+                explanation="Stamp duty payment receipt details were not found in the document.",
+                source_pages=source_pages_str,
+            )
+        )
+
+    assessment.findings_list = findings_list
+    if db:
+        existing_new_rules = {
+            f.rule_id
+            for f in db.new
+            if isinstance(f, ValidationFinding) and f.document_id == document.id
+        }
+        for f in findings_list:
+            if f.rule_id not in existing_new_rules:
+                db.add(f)
+
+    def _add_or_update_doc_field(
+        fname: str,
+        fval: str | None,
+        spage: int,
+        fev: str,
+        fmethod: str = "stamp_duty_assessment",
+    ):
+        if fval is None:
+            return
+        existing = next((f for f in document.fields if f.field_name == fname), None)
+        if not existing and db:
+            existing = db.scalar(
+                select(ExtractedField).where(
+                    ExtractedField.document_id == document.id,
+                    ExtractedField.field_name == fname,
+                )
+            )
+        if not existing:
+            new_f = ExtractedField(
+                document_id=document.id,
+                field_name=fname,
+                extracted_value=str(fval),
+                normalized_value=str(fval),
+                source_page=spage,
+                evidence=fev,
+                extraction_method=fmethod,
+                verification_status="unreviewed",
+            )
+            if db:
+                db.add(new_f)
+            document.fields.append(new_f)
+        else:
+            if existing.extracted_value is None and fval is not None:
+                existing.extracted_value = str(fval)
+                existing.normalized_value = str(fval)
+
+    _add_or_update_doc_field("property_type", prop_type if prop_type != "unknown" else None, prop_page, prop_ev)
+    _add_or_update_doc_field("property_description", prop_desc, prop_page, prop_ev)
+    _add_or_update_doc_field("property_location", prop_loc, prop_page, prop_ev)
+    _add_or_update_doc_field("survey_number", surv_no, prop_page, prop_ev)
+    _add_or_update_doc_field("area", prop_area, prop_page, prop_ev)
+    _add_or_update_doc_field("market_value", str(mv) if mv is not None else None, mv_page, mv_ev)
+    _add_or_update_doc_field("relationship_eligibility", rel_elig, rel_page, rel_ev)
+    _add_or_update_doc_field("stamp_duty_paid", str(base_paid) if base_paid is not None else None, duty_page, duty_ev)
+    _add_or_update_doc_field("metro_cess_paid", str(metro_paid) if metro_paid is not None else None, duty_page, duty_ev)
+    _add_or_update_doc_field("total_stamp_duty_paid", str(total_paid) if total_paid is not None else None, duty_page, duty_ev)
+    _add_or_update_doc_field("challan_number", challan_no, duty_page, duty_ev)
+    _add_or_update_doc_field("expected_stamp_duty", str(expected_total) if expected_total is not None else None, duty_page, "Expected stamp duty calculated under Article 34")
+    _add_or_update_doc_field("stamp_duty_difference", str(difference) if difference is not None else None, duty_page, "Difference between total paid and expected stamp duty")
+    _add_or_update_doc_field("stamp_duty_status", status, duty_page, status_reason)
+
+    return assessment
 
 
 _INVOICE_LABELS = tuple(
@@ -768,6 +1620,96 @@ def extract_fields(document: LogicalDocument, pages: list[Page], all_pages: list
                 )
             )
 
+        prop_type, prop_desc, prop_loc, surv_no, prop_area, sched_mv, prop_is_amb, prop_ev, prop_page = (
+            extract_property_schedule(text_by_page)
+        )
+        if prop_type != "unknown":
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="property_type",
+                    extracted_value=prop_type,
+                    normalized_value=prop_type,
+                    source_page=prop_page,
+                    evidence=prop_ev,
+                    extraction_method="schedule_rule",
+                    verification_status="unreviewed",
+                )
+            )
+
+        mv, has_conf_mv, mv_ev, mv_page, is_assessed_fallback = extract_market_value(text_by_page)
+        if mv is None and sched_mv is not None:
+            mv = sched_mv
+        if mv is not None:
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="market_value",
+                    extracted_value=str(mv),
+                    normalized_value=str(mv),
+                    source_page=mv_page,
+                    evidence=mv_ev,
+                    extraction_method="valuation_rule",
+                    verification_status="unreviewed",
+                )
+            )
+        elif document.category == "gift_deed":
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="market_value",
+                    extracted_value=None,
+                    normalized_value=None,
+                    source_page=mv_page,
+                    evidence=mv_ev,
+                    extraction_method="expected_gift_deed_field",
+                    verification_status="not_available",
+                )
+            )
+
+        base_paid, metro_paid, total_paid, challan_no, has_conf_duty, duty_ev, duty_page = (
+            extract_stamp_duty_paid(text_by_page)
+        )
+        if base_paid is not None:
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="stamp_duty_paid",
+                    extracted_value=str(base_paid),
+                    normalized_value=str(base_paid),
+                    source_page=duty_page,
+                    evidence=duty_ev,
+                    extraction_method="stamp_duty_rule",
+                    verification_status="unreviewed",
+                )
+            )
+        if metro_paid is not None:
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="metro_cess_paid",
+                    extracted_value=str(metro_paid),
+                    normalized_value=str(metro_paid),
+                    source_page=duty_page,
+                    evidence=duty_ev,
+                    extraction_method="stamp_duty_rule",
+                    verification_status="unreviewed",
+                )
+            )
+        if total_paid is not None:
+            found.append(
+                ExtractedField(
+                    document_id=document.id,
+                    field_name="total_stamp_duty_paid",
+                    extracted_value=str(total_paid),
+                    normalized_value=str(total_paid),
+                    source_page=duty_page,
+                    evidence=duty_ev,
+                    extraction_method="stamp_duty_rule",
+                    verification_status="unreviewed",
+                )
+            )
+
     return found
 
 
@@ -828,6 +1770,17 @@ def refresh_ingestion_extraction(db: Session, ingestion_id: str) -> dict[str, in
                     "missing_invoice_fields",
                     "missing_donor_donee_relationship",
                     "ambiguous_donor_donee_relationship",
+                    "short_paid_stamp_duty",
+                    "stamp_duty_short_paid",
+                    "conflicting_market_values",
+                    "stamp_duty_calculation_requires_review",
+                    "ambiguous_property_type",
+                    "unknown_property_type",
+                    "ineligible_article_34_relationship",
+                    "relationship_not_eligible_article_34",
+                    "missing_market_value",
+                    "missing_stamp_duty_paid",
+                    "metro_cess_jurisdiction_unknown",
                 ]),
             )
         )
@@ -880,6 +1833,12 @@ def refresh_ingestion_extraction(db: Session, ingestion_id: str) -> dict[str, in
                         source_pages=str(rel_field.source_page),
                     )
                 )
+        if document.category == "gift_deed" or any(f.field_name == "donor_donee_relationship" for f in refreshed):
+            text_by_page = [
+                (page.page_number, page.ocr_text_corrected or page.ocr_text_original or page.digital_text or "")
+                for page in document_pages
+            ]
+            assess_stamp_duty_article_34(document, text_by_page, all_pages=pages, db=db)
         refreshed_documents += 1
 
     return {"documents": refreshed_documents, "fields": refreshed_fields}
@@ -1049,6 +2008,7 @@ def process_ingestion(ingestion_id: str, db_factory) -> None:
             if existing_doc_ids:
                 db.execute(delete(ValidationFinding).where(ValidationFinding.document_id.in_(existing_doc_ids)))
                 db.execute(delete(ExtractedField).where(ExtractedField.document_id.in_(existing_doc_ids)))
+                db.execute(delete(StampDutyAssessment).where(StampDutyAssessment.document_id.in_(existing_doc_ids)))
             db.execute(delete(LogicalDocument).where(LogicalDocument.ingestion_id == ingestion_id))
             db.execute(delete(Page).where(Page.ingestion_id == ingestion_id))
             db.flush()
@@ -1232,6 +2192,12 @@ def process_ingestion(ingestion_id: str, db_factory) -> None:
                             source_pages=str(rel_field.source_page),
                         )
                     )
+            if doc.category == "gift_deed" or any(f.field_name == "donor_donee_relationship" for f in doc.fields):
+                text_by_page = [
+                    (page.page_number, page.ocr_text_corrected or page.ocr_text_original or page.digital_text or "")
+                    for page in pages
+                ]
+                assess_stamp_duty_article_34(doc, text_by_page, all_pages=page_results, db=db)
             for field in doc.fields:
                 if field.field_name.endswith("_name") and field.extracted_value:
                     person = Person(display_name=field.extracted_value, name_original=field.extracted_value)

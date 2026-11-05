@@ -8,8 +8,9 @@ import mimetypes
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -21,7 +22,14 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from .config import get_settings
+from .config import (
+    METRO_CESS_JURISDICTIONS,
+    NON_METRO_INDICATORS,
+    STAMP_DUTY_BASE_AMOUNT,
+    STAMP_DUTY_METRO_CESS_RATE,
+    STAMP_DUTY_RULE_VERSION,
+    get_settings,
+)
 from .comparison_jobs import create_comparison, run_comparison
 from .db import Base, SessionLocal, engine, get_db
 from .image_utils import validate_image
@@ -40,13 +48,19 @@ from .models import (
     Person,
     PropertyRecord,
     ReviewDecision,
+    StampDutyAssessment,
     ValidationFinding,
 )
 from .ocr import detect_table_lines, get_ocr_status
 from .pdf_utils import LocalImageBundle, LocalPdf
 from .pdf_report import IngestionNotCompleteError, SourceChangedError, build_ingestion_report
-from .processing import process_ingestion, refresh_ingestion_extraction
-from .processing import sync_case_entities
+from .processing import (
+    evaluate_article_34_relationship,
+    parse_indian_currency_amount,
+    process_ingestion,
+    refresh_ingestion_extraction,
+    sync_case_entities,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -108,6 +122,57 @@ class FindingDecision(BaseModel):
 
 class ComparisonRequest(BaseModel):
     mode: Literal["pp_structure", "docling", "compare"]
+
+
+class StampDutyAssessmentResponse(BaseModel):
+    id: int
+    document_id: str | int
+    donor_name: str | None = None
+    donee_name: str | None = None
+    property_type: str = "unknown"
+    property_description: str | None = None
+    property_location: str | None = None
+    survey_number: str | None = None
+    area: str | None = None
+    relationship: str | None = None
+    relationship_normalized: str | None = None
+    relationship_eligibility: str = "unknown"
+    jurisdiction: str = "unknown"
+    market_value: int | None = None
+    base_stamp_duty: int | None = None
+    metro_cess_rate: float | None = None
+    metro_cess: int | None = None
+    expected_total: int | None = None
+    stamp_duty_paid: int | None = None
+    metro_cess_paid: int | None = None
+    total_stamp_duty_paid: int | None = None
+    challan_number: str | None = None
+    difference: int | None = None
+    status: str = "requires_review"
+    legal_rule_version: str = "MH-ART34-2024.1"
+    evidence: Any = None
+    source_pages: list[int] = Field(default_factory=list)
+    review_status: str = "unreviewed"
+    reviewer_notes: str | None = None
+
+
+class StampDutyAssessmentUpdateRequest(BaseModel):
+    property_type: str | None = None
+    property_description: str | None = None
+    property_location: str | None = None
+    survey_number: str | None = None
+    area: str | None = None
+    relationship: str | None = None
+    relationship_eligibility: Literal["eligible", "not_eligible", "unknown", "ambiguous"] | None = None
+    jurisdiction: str | None = None
+    market_value: int | None = None
+    stamp_duty_paid: int | None = None
+    metro_cess_paid: int | None = None
+    total_stamp_duty_paid: int | None = None
+    challan_number: str | None = None
+    status: Literal["compliant", "short_paid", "not_available", "not_applicable", "requires_review"] | None = None
+    review_status: Literal["unreviewed", "confirmed", "corrected", "requires_review"] | None = None
+    reviewer_notes: str | None = None
 
 
 def _process_ingestion_with_comparison(ingestion_id: str, comparison_id: str) -> None:
@@ -689,8 +754,209 @@ def reprocess_ingestion_fields(ingestion_id: str, db: Session = Depends(get_db))
     return {"id": ingestion_id, "status": ingestion.status, **summary}
 
 
+def _serialize_stamp_duty_assessment(assessment: StampDutyAssessment | None) -> dict | None:
+    if not assessment:
+        return None
+    source_pages: list[int] = []
+    if assessment.source_pages:
+        for p in str(assessment.source_pages).replace(";", ",").split(","):
+            p_str = p.strip()
+            if p_str.isdigit():
+                source_pages.append(int(p_str))
+
+    evidence_val: Any = assessment.evidence
+    if isinstance(evidence_val, str) and evidence_val.strip().startswith("{") and evidence_val.strip().endswith("}"):
+        try:
+            evidence_val = json.loads(evidence_val)
+        except Exception:
+            evidence_val = {"summary": assessment.evidence}
+    elif isinstance(evidence_val, str) and evidence_val:
+        evidence_val = {"summary": evidence_val}
+
+    return {
+        "id": assessment.id,
+        "document_id": assessment.document_id,
+        "donor_name": assessment.donor_name,
+        "donee_name": assessment.donee_name,
+        "property_type": assessment.property_type or "unknown",
+        "property_description": assessment.property_description,
+        "property_location": assessment.property_location,
+        "survey_number": assessment.survey_number,
+        "area": assessment.area,
+        "relationship": assessment.relationship,
+        "relationship_normalized": assessment.relationship_normalized,
+        "relationship_eligibility": assessment.relationship_eligibility or "unknown",
+        "jurisdiction": assessment.jurisdiction or "unknown",
+        "market_value": assessment.market_value,
+        "base_stamp_duty": assessment.base_duty,
+        "metro_cess_rate": assessment.metro_cess_rate,
+        "metro_cess": assessment.metro_cess_amount,
+        "expected_total": assessment.expected_total,
+        "stamp_duty_paid": assessment.stamp_duty_paid,
+        "metro_cess_paid": assessment.metro_cess_paid,
+        "total_stamp_duty_paid": assessment.total_stamp_duty_paid,
+        "challan_number": assessment.challan_number,
+        "difference": assessment.difference,
+        "status": assessment.status or "requires_review",
+        "legal_rule_version": assessment.legal_rule_version or "MH-ART34-2024.1",
+        "evidence": evidence_val or {},
+        "source_pages": source_pages,
+        "review_status": assessment.review_status or "unreviewed",
+        "reviewer_notes": assessment.reviewer_notes,
+    }
+
+
+def recalculate_and_sync_stamp_duty_assessment(
+    db: Session,
+    assessment: StampDutyAssessment,
+    doc: LogicalDocument,
+    explicit_status: str | None = None,
+    skip_field_id: str | None = None,
+) -> None:
+    rel_elig = assessment.relationship_eligibility or "unknown"
+    prop_type = assessment.property_type or "unknown"
+    mv = assessment.market_value
+
+    jur_text = (assessment.jurisdiction or "").casefold()
+    is_non_metro = any(ind in jur_text for ind in NON_METRO_INDICATORS)
+    is_metro = (
+        prop_type != "agricultural_land"
+        and not is_non_metro
+        and ("metro" in jur_text or any(j in jur_text for j in METRO_CESS_JURISDICTIONS))
+    )
+
+    assessment.metro_cess_rate = float(STAMP_DUTY_METRO_CESS_RATE) if is_metro else 0.0
+
+    if assessment.total_stamp_duty_paid is None and (assessment.stamp_duty_paid is not None or assessment.metro_cess_paid is not None):
+        assessment.total_stamp_duty_paid = (assessment.stamp_duty_paid or 0) + (assessment.metro_cess_paid or 0)
+    total_paid = assessment.total_stamp_duty_paid
+
+    if explicit_status:
+        assessment.status = explicit_status
+    elif rel_elig == "not_eligible" or prop_type == "other_property":
+        assessment.status = "not_applicable"
+        assessment.base_duty = None
+        assessment.metro_cess_amount = None
+        assessment.expected_total = None
+        assessment.difference = None
+    elif rel_elig == "ambiguous" or prop_type == "unknown":
+        assessment.status = "requires_review"
+        assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+        if mv is not None:
+            metro_cess = (Decimal(mv) * Decimal(str(assessment.metro_cess_rate))).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            assessment.metro_cess_amount = int(metro_cess)
+            assessment.expected_total = assessment.base_duty + assessment.metro_cess_amount
+            if total_paid is not None:
+                assessment.difference = total_paid - assessment.expected_total
+    elif rel_elig == "unknown":
+        assessment.status = "not_available"
+        assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+        assessment.metro_cess_amount = None
+        assessment.expected_total = None
+        assessment.difference = None
+    elif mv is None:
+        if is_metro:
+            assessment.status = "requires_review"
+            assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+            assessment.metro_cess_amount = None
+            assessment.expected_total = None
+            assessment.difference = None
+        else:
+            assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+            assessment.metro_cess_amount = 0
+            assessment.expected_total = assessment.base_duty
+            if total_paid is not None:
+                diff = total_paid - assessment.expected_total
+                assessment.difference = diff
+                assessment.status = "compliant" if diff >= 0 else "short_paid"
+            else:
+                assessment.status = "requires_review"
+                assessment.difference = None
+    else:
+        assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+        if is_metro:
+            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+            assessment.metro_cess_amount = int(metro_cess)
+            assessment.expected_total = assessment.base_duty + assessment.metro_cess_amount
+        else:
+            assessment.metro_cess_amount = 0
+            assessment.expected_total = assessment.base_duty
+
+        if total_paid is not None:
+            diff = total_paid - assessment.expected_total
+            assessment.difference = diff
+            assessment.status = "compliant" if diff >= 0 else "short_paid"
+        else:
+            assessment.status = "requires_review"
+            assessment.difference = None
+
+    def sync_field(name: str, val: str | None):
+        f = db.scalar(
+            select(ExtractedField).where(
+                ExtractedField.document_id == doc.id, ExtractedField.field_name == name
+            )
+        )
+        if not f:
+            if val is not None:
+                f = ExtractedField(
+                    document_id=doc.id,
+                    field_name=name,
+                    extracted_value=val,
+                    verified_value=val,
+                    normalized_value=val,
+                    source_page=doc.start_page,
+                    evidence="Synchronized from Article 34 Stamp Duty Assessment.",
+                    extraction_method="reviewer_sync",
+                    verification_status="verified",
+                )
+                db.add(f)
+        else:
+            if f.id != skip_field_id:
+                f.verified_value = val
+                f.verification_status = "verified"
+                f.normalized_value = val
+
+    sync_field("market_value", str(assessment.market_value) if assessment.market_value is not None else None)
+    sync_field("property_type", assessment.property_type if assessment.property_type != "unknown" else None)
+    sync_field("property_description", assessment.property_description)
+    sync_field("property_location", assessment.property_location)
+    sync_field("survey_number", assessment.survey_number)
+    sync_field("area", assessment.area)
+    sync_field("stamp_duty_paid", str(assessment.stamp_duty_paid) if assessment.stamp_duty_paid is not None else None)
+    sync_field("metro_cess_paid", str(assessment.metro_cess_paid) if assessment.metro_cess_paid is not None else None)
+    sync_field("total_stamp_duty_paid", str(assessment.total_stamp_duty_paid) if assessment.total_stamp_duty_paid is not None else None)
+    sync_field("expected_stamp_duty", str(assessment.expected_total) if assessment.expected_total is not None else None)
+    sync_field("stamp_duty_difference", str(assessment.difference) if assessment.difference is not None else None)
+    sync_field("stamp_duty_status", assessment.status)
+    sync_field("relationship_eligibility", assessment.relationship_eligibility)
+    if assessment.challan_number:
+        sync_field("challan_number", assessment.challan_number)
+    if assessment.relationship:
+        sync_field("donor_donee_relationship", assessment.relationship)
+
+
 def _doc_dict(row: LogicalDocument):
-    return {"id": row.id, "ingestion_id": row.ingestion_id, "source_type": row.ingestion.source_type, "case_id": row.case_id, "start_page": row.start_page, "end_page": row.end_page, "category": row.category, "predicted_category": row.predicted_category, "confidence_proxy": row.confidence_proxy, "classification_evidence": row.classification_evidence, "review_status": row.review_status, "case_link_status": row.case_link_status, "case_link_evidence": row.case_link_evidence, "fields": [_field_dict(field) for field in row.fields]}
+    return {
+        "id": row.id,
+        "ingestion_id": row.ingestion_id,
+        "source_type": row.ingestion.source_type,
+        "case_id": row.case_id,
+        "start_page": row.start_page,
+        "end_page": row.end_page,
+        "category": row.category,
+        "predicted_category": row.predicted_category,
+        "confidence_proxy": row.confidence_proxy,
+        "classification_evidence": row.classification_evidence,
+        "review_status": row.review_status,
+        "case_link_status": row.case_link_status,
+        "case_link_evidence": row.case_link_evidence,
+        "fields": [_field_dict(field) for field in row.fields],
+        "stamp_duty_assessment": _serialize_stamp_duty_assessment(getattr(row, "stamp_duty_assessment", None)),
+    }
 
 
 def _field_dict(field: ExtractedField, mask_sensitive: bool = True):
@@ -741,7 +1007,12 @@ def list_documents(
     base = select(LogicalDocument)
     if filters:
         base = base.where(*filters)
-    stmt = base.options(selectinload(LogicalDocument.fields)).order_by(LogicalDocument.start_page).offset((page - 1) * page_size).limit(page_size)
+    stmt = (
+        base.options(selectinload(LogicalDocument.fields), selectinload(LogicalDocument.stamp_duty_assessment))
+        .order_by(LogicalDocument.start_page)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
     rows = db.scalars(stmt).all()
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     return {"items": [_doc_dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
@@ -749,7 +1020,11 @@ def list_documents(
 
 @app.get("/api/documents/{document_id}")
 def document_detail(document_id: str, db: Session = Depends(get_db)):
-    row = db.scalar(select(LogicalDocument).options(selectinload(LogicalDocument.fields)).where(LogicalDocument.id == document_id))
+    row = db.scalar(
+        select(LogicalDocument)
+        .options(selectinload(LogicalDocument.fields), selectinload(LogicalDocument.stamp_duty_assessment))
+        .where(LogicalDocument.id == document_id)
+    )
     if not row:
         raise HTTPException(404, "Document not found.")
     pages = db.scalars(select(Page).where(Page.ingestion_id == row.ingestion_id, Page.page_number >= row.start_page, Page.page_number <= row.end_page).order_by(Page.page_number)).all()
@@ -916,6 +1191,75 @@ def review_case_link(document_id: str, payload: CaseLinkDecision, db: Session = 
     return {"id": doc.id, "case_id": doc.case_id, "case_link_status": doc.case_link_status}
 
 
+@app.patch("/api/documents/{document_id}/stamp-duty-assessment", response_model=StampDutyAssessmentResponse)
+def update_stamp_duty_assessment(
+    document_id: str,
+    payload: StampDutyAssessmentUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    doc = db.scalar(
+        select(LogicalDocument)
+        .options(selectinload(LogicalDocument.fields), selectinload(LogicalDocument.stamp_duty_assessment))
+        .where(LogicalDocument.id == document_id)
+    )
+    if not doc:
+        raise HTTPException(404, "Document not found.")
+
+    assessment = doc.stamp_duty_assessment
+    if not assessment:
+        assessment = StampDutyAssessment(document_id=doc.id)
+        db.add(assessment)
+        doc.stamp_duty_assessment = assessment
+
+    recalc_keys = {
+        "market_value",
+        "stamp_duty_paid",
+        "metro_cess_paid",
+        "total_stamp_duty_paid",
+        "property_type",
+        "relationship_eligibility",
+        "jurisdiction",
+    }
+    update_data = payload.model_dump(exclude_unset=True)
+    needs_recalc = any(k in update_data for k in recalc_keys)
+
+    old_status = assessment.status
+    for field_name, value in update_data.items():
+        if field_name == "status":
+            continue
+        setattr(assessment, field_name, value)
+
+    if "relationship" in update_data and "relationship_eligibility" not in update_data:
+        if update_data["relationship"]:
+            _, norm, elig, _, _, _ = evaluate_article_34_relationship(update_data["relationship"])
+            assessment.relationship_normalized = norm
+            assessment.relationship_eligibility = elig
+            needs_recalc = True
+
+    explicit_status = update_data.get("status")
+    if needs_recalc or explicit_status:
+        recalculate_and_sync_stamp_duty_assessment(db, assessment, doc, explicit_status=explicit_status)
+    elif "status" in update_data:
+        assessment.status = update_data["status"]
+
+    if payload.review_status:
+        assessment.review_status = payload.review_status
+    elif needs_recalc and assessment.review_status == "unreviewed":
+        assessment.review_status = "corrected"
+
+    _audit(
+        db,
+        "stamp_duty_assessment",
+        str(assessment.id or doc.id),
+        "assessment_updated",
+        old_status,
+        assessment.status,
+    )
+    db.commit()
+    db.refresh(assessment)
+    return _serialize_stamp_duty_assessment(assessment)
+
+
 @app.post("/api/documents/{document_id}/split", status_code=201)
 def split_document(document_id: str, payload: SplitDocumentRequest, db: Session = Depends(get_db)):
     doc = db.scalar(select(LogicalDocument).options(selectinload(LogicalDocument.fields)).where(LogicalDocument.id == document_id))
@@ -1013,6 +1357,67 @@ def correct_field(field_id: str, payload: FieldCorrection, db: Session = Depends
     else:
         _audit(db, "field", field.id, "field_corrected", old, payload.value)
     db.add(ReviewDecision(entity_type="field", entity_id=field.id, decision=payload.verification_status))
+
+    doc = db.get(LogicalDocument, field.document_id)
+    if doc and (doc.category == "gift_deed" or doc.stamp_duty_assessment is not None):
+        assessment = doc.stamp_duty_assessment
+        if not assessment and doc.category == "gift_deed":
+            assessment = StampDutyAssessment(document_id=doc.id)
+            db.add(assessment)
+            doc.stamp_duty_assessment = assessment
+
+        if assessment:
+            fname = field.field_name
+            val = payload.value
+            relevant = False
+            if fname == "market_value":
+                assessment.market_value = parse_indian_currency_amount(val or "") if val else None
+                relevant = True
+            elif fname == "property_type":
+                assessment.property_type = val or "unknown"
+                relevant = True
+            elif fname in ("stamp_duty_paid", "paid_stamp_duty"):
+                assessment.stamp_duty_paid = parse_indian_currency_amount(val or "") if val else None
+                relevant = True
+            elif fname == "metro_cess_paid":
+                assessment.metro_cess_paid = parse_indian_currency_amount(val or "") if val else None
+                relevant = True
+            elif fname in ("total_stamp_duty_paid", "total_paid"):
+                assessment.total_stamp_duty_paid = parse_indian_currency_amount(val or "") if val else None
+                relevant = True
+            elif fname in ("donor_donee_relationship", "relationship"):
+                assessment.relationship = val
+                if val:
+                    _, norm_rel, elig, _, _, _ = evaluate_article_34_relationship(val)
+                    assessment.relationship_normalized = norm_rel
+                    assessment.relationship_eligibility = elig
+                else:
+                    assessment.relationship_normalized = None
+                    assessment.relationship_eligibility = "unknown"
+                relevant = True
+            elif fname == "relationship_eligibility":
+                assessment.relationship_eligibility = val or "unknown"
+                relevant = True
+            elif fname == "survey_number":
+                assessment.survey_number = val
+                relevant = True
+            elif fname == "property_location":
+                assessment.property_location = val
+                relevant = True
+            elif fname == "property_description":
+                assessment.property_description = val
+                relevant = True
+            elif fname == "area":
+                assessment.area = val
+                relevant = True
+            elif fname == "challan_number":
+                assessment.challan_number = val
+                relevant = True
+
+            if relevant:
+                assessment.review_status = "corrected"
+                recalculate_and_sync_stamp_duty_assessment(db, assessment, doc, skip_field_id=field.id)
+
     db.commit()
     return _field_dict(field)
 
