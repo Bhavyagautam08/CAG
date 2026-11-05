@@ -84,15 +84,23 @@ def get_ocr_status() -> dict[str, object]:
 
 @lru_cache(maxsize=3)
 def _paddle_reader(language: str):
-    os.environ.setdefault("PADDLE_PDX_CPU_NUM_THREADS", str(min(4, os.cpu_count() or 1)))
+    requested_device = get_settings().ocr_device
     from paddleocr import PaddleOCR
+    import paddle
+
+    gpu_available = paddle.is_compiled_with_cuda()
+    use_gpu = requested_device != "cpu" and gpu_available
+    if requested_device == "gpu" and not gpu_available:
+        logger.warning("GPU OCR was requested for PaddleOCR, but the installed PaddlePaddle runtime has no CUDA support; using CPU.")
+    if not use_gpu:
+        os.environ.setdefault("PADDLE_PDX_CPU_NUM_THREADS", str(min(4, os.cpu_count() or 1)))
 
     return PaddleOCR(
         text_detection_model_name="PP-OCRv5_mobile_det",
         text_recognition_model_name=(
             "en_PP-OCRv5_mobile_rec" if language == "en" else "devanagari_PP-OCRv5_mobile_rec"
         ),
-        device="cpu",
+        device="gpu" if use_gpu else "cpu",
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
@@ -104,12 +112,17 @@ def _paddle_reader(language: str):
 def _easy_reader(languages: tuple[str, ...]):
     import torch
 
-    cpu_threads = min(4, os.cpu_count() or 1)
-    torch.set_num_threads(cpu_threads)
-    torch.set_num_interop_threads(1)
+    requested_device = get_settings().ocr_device
+    use_gpu = requested_device != "cpu" and torch.cuda.is_available()
+    if requested_device == "gpu" and not use_gpu:
+        logger.warning("GPU OCR was requested for EasyOCR, but PyTorch CUDA is unavailable; using CPU.")
+    if not use_gpu:
+        cpu_threads = min(4, os.cpu_count() or 1)
+        torch.set_num_threads(cpu_threads)
+        torch.set_num_interop_threads(1)
     import easyocr
 
-    return easyocr.Reader(list(languages), gpu=False, verbose=False)
+    return easyocr.Reader(list(languages), gpu=use_gpu, verbose=False)
 
 
 def _plain(value):
@@ -273,6 +286,10 @@ def _easyocr_mode(paddle_words: list[dict]) -> str:
     if average < _HIGH_PADDLE_PAGE_CONFIDENCE or min(scores) < _LOW_PADDLE_WORD_CONFIDENCE:
         return "targeted"
     return "skip"
+
+
+def _secondary_ocr_enabled() -> bool:
+    return get_settings().ocr_secondary_verification
 
 
 def _uncertain_line_regions(image_path: Path, paddle_words: list[dict]) -> list[list[int]]:
@@ -512,7 +529,7 @@ def run_ocr(
     errors = []
     easy_words = []
     easyocr_succeeded = False
-    verification_mode = _easyocr_mode(paddle_words)
+    verification_mode = _easyocr_mode(paddle_words) if _secondary_ocr_enabled() else "skip"
     if verification_mode != "skip":
         if progress_callback:
             progress_callback("loading_easyocr", 0.5)

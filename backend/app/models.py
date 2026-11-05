@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship as sa_relationship, relationship
 
 from .db import Base
 
@@ -135,6 +135,11 @@ class LogicalDocument(Base):
         cascade="all, delete-orphan",
         foreign_keys="DocumentRelationship.document_id",
     )
+    stamp_duty_assessment: Mapped["StampDutyAssessment | None"] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class DocumentRelationship(Base):
@@ -261,3 +266,65 @@ class AuditEvent(Base):
     after_value: Mapped[str | None] = mapped_column(Text)
     actor: Mapped[str] = mapped_column(String(128), default="local-reviewer")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StampDutyAssessment(Base):
+    __tablename__ = "stamp_duty_assessments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("logical_documents.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    donor_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    donee_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    relationship: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    relationship_normalized: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    relationship_eligibility: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unknown"
+    )
+    property_type: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="unknown"
+    )
+    property_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    property_location: Mapped[str | None] = mapped_column(Text, nullable=True)
+    survey_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    area: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    jurisdiction: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="unknown"
+    )
+    market_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    base_duty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metro_cess_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metro_cess_amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    expected_total: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    stamp_duty_paid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    metro_cess_paid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_stamp_duty_paid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    challan_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    difference: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="requires_review"
+    )
+    legal_rule_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="MH-ART34-2024.1"
+    )
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_pages: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unreviewed"
+    )
+    reviewer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    document: Mapped["LogicalDocument"] = sa_relationship(back_populates="stamp_duty_assessment")
+
+
+Document = LogicalDocument

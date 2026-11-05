@@ -140,6 +140,69 @@ export interface Document {
   case_link_evidence: string | null;
   fields: Field[];
   pages?: Page[];
+  stamp_duty_assessment?: StampDutyAssessment | null;
+}
+
+export interface StampDutyAssessment {
+  id: number;
+  document_id: string | number;
+  donor_name: string | null;
+  donee_name: string | null;
+  property_type: string;
+  property_description: string | null;
+  property_location: string | null;
+  survey_number: string | null;
+  area: string | null;
+  relationship: string | null;
+  relationship_normalized: string | null;
+  relationship_eligibility: "eligible" | "not_eligible" | "unknown" | "ambiguous" | string;
+  jurisdiction: string;
+  market_value: number | null;
+  base_stamp_duty: number | null;
+  metro_cess_rate: number | null;
+  metro_cess: number | null;
+  expected_total: number | null;
+  stamp_duty_paid: number | null;
+  metro_cess_paid: number | null;
+  total_stamp_duty_paid: number | null;
+  challan_number: string | null;
+  difference: number | null;
+  status: "compliant" | "short_paid" | "not_available" | "not_applicable" | "requires_review" | string;
+  legal_rule_version: string;
+  evidence: Record<string, unknown> | string | null;
+  source_pages: number[];
+  review_status: "unreviewed" | "confirmed" | "corrected" | "requires_review" | string;
+  reviewer_notes: string | null;
+}
+
+export interface StampDutyAssessmentUpdate {
+  property_type?: string;
+  property_description?: string;
+  property_location?: string;
+  survey_number?: string;
+  area?: string;
+  relationship?: string;
+  relationship_eligibility?: "eligible" | "not_eligible" | "unknown" | "ambiguous";
+  jurisdiction?: string;
+  market_value?: number;
+  stamp_duty_paid?: number;
+  metro_cess_paid?: number;
+  total_stamp_duty_paid?: number;
+  challan_number?: string;
+  status?: "compliant" | "short_paid" | "not_available" | "not_applicable" | "requires_review";
+  review_status?: "unreviewed" | "confirmed" | "corrected" | "requires_review";
+  reviewer_notes?: string;
+}
+
+export async function updateStampDutyAssessment(
+  documentId: string | number,
+  payload: StampDutyAssessmentUpdate,
+): Promise<StampDutyAssessment> {
+  return api<StampDutyAssessment>(`/documents/${documentId}/stamp-duty-assessment`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export interface Field {
