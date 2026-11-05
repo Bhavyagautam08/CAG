@@ -16,6 +16,24 @@ STAMP_DUTY_EFFECTIVE_TO: str | None = None
 STAMP_DUTY_BASE_AMOUNT: Decimal = Decimal("200")
 STAMP_DUTY_METRO_CESS_RATE: Decimal = Decimal("0.01")
 
+# Maharashtra Stamp Act Article 34 Concessional Categories (Donee's relation to donor)
+ARTICLE_34_200_RELATIONS: frozenset[str] = frozenset({
+    "husband",
+    "wife",
+    "son",
+    "daughter",
+    "grandson",
+    "granddaughter",
+    "wife_of_deceased_son",
+})
+
+ARTICLE_34_3_PERCENT_FAMILY_RELATIONS: frozenset[str] = frozenset({
+    "father",
+    "mother",
+    "brother",
+    "sister",
+})
+
 # Controlled normalized eligible relationships under Article 34
 ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS: frozenset[str] = frozenset({
     "father",

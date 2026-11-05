@@ -864,6 +864,8 @@ function StampDutyAssessmentPanel({
   onUpdated: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [selectedRule, setSelectedRule] = useState(assessment?.selected_rule ?? "article_34_200");
+  const [locationBand, setLocationBand] = useState(assessment?.location_band ?? "municipal_corporation_mmr_influence");
   const [propertyType, setPropertyType] = useState(assessment?.property_type ?? "residential_property");
   const [relationshipEligibility, setRelationshipEligibility] = useState(assessment?.relationship_eligibility ?? "eligible");
   const [jurisdiction, setJurisdiction] = useState(assessment?.jurisdiction ?? "maharashtra_metro_cess");
@@ -875,6 +877,8 @@ function StampDutyAssessmentPanel({
 
   useEffect(() => {
     if (assessment) {
+      setSelectedRule(assessment.selected_rule ?? "article_34_200");
+      setLocationBand(assessment.location_band ?? "municipal_corporation_mmr_influence");
       setPropertyType(assessment.property_type ?? "residential_property");
       setRelationshipEligibility(assessment.relationship_eligibility ?? "eligible");
       setJurisdiction(assessment.jurisdiction ?? "maharashtra_metro_cess");
@@ -902,6 +906,8 @@ function StampDutyAssessmentPanel({
     const parsedMv = marketValue.trim() ? Number(marketValue.replace(/[^\d.-]/g, "")) : undefined;
     const parsedPaid = stampDutyPaid.trim() ? Number(stampDutyPaid.replace(/[^\d.-]/g, "")) : undefined;
     updateMutation.mutate({
+      selected_rule: selectedRule as any,
+      location_band: locationBand || undefined,
       property_type: propertyType,
       relationship_eligibility: relationshipEligibility as any,
       jurisdiction: jurisdiction,
@@ -930,6 +936,12 @@ function StampDutyAssessmentPanel({
   };
   const statusDisplay = statusLabels[status] ?? humanize(status);
 
+  const surnameRiskFinding = doc.findings?.find((f) => f.rule_id === "donor_donee_surname_mismatch");
+  const surnameMeta = assessment?.source_evidence?.surname_risk;
+  const showSurnameMismatchNotice = Boolean(
+    surnameRiskFinding || (surnameMeta && surnameMeta.matches === false && !surnameMeta.suppressed)
+  );
+
   return (
     <section className="panel stamp-duty-panel">
       <div className="panel-heading sda-panel-heading">
@@ -942,8 +954,19 @@ function StampDutyAssessmentPanel({
             <span className={`sda-review-badge ${assessment?.review_status ?? "unreviewed"}`}>
               {humanize(assessment?.review_status ?? "unreviewed")}
             </span>
+            <span className={`sda-rule-badge ${assessment?.selected_rule ?? "review_required"}`}>
+              Rule: {
+                assessment?.selected_rule === "article_34_200"
+                  ? "Article 34 (₹200 Fixed)"
+                  : assessment?.selected_rule === "article_34_3_percent"
+                    ? "Article 34 (3% Family/Other)"
+                    : assessment?.selected_rule === "article_25"
+                      ? "Article 25 (Conveyance)"
+                      : "Review Required"
+              }
+            </span>
           </div>
-          <p>Maharashtra Stamp Act, Article 34 (Family Gift Concession: ₹200 base duty + 1% Metro Cess)</p>
+          <p>Maharashtra Stamp Act, Article 34 (Family Gift Concession) / Article 25 (Standard Conveyance)</p>
         </div>
         <div className="sda-header-actions">
           {!editing ? (
@@ -979,6 +1002,19 @@ function StampDutyAssessmentPanel({
         </div>
       </div>
 
+      {showSurnameMismatchNotice && (
+        <div className="notice notice-warning sda-notice" style={{ marginTop: 8 }}>
+          <AlertCircle size={15} />
+          <div>
+            <b>Identity Verification Notice: Donor-Donee Surname Mismatch</b>
+            <p style={{ margin: "2px 0 0 0", fontSize: "0.85em" }}>
+              {surnameRiskFinding?.explanation ||
+                `Surname mismatch detected between donor ('${surnameMeta?.donor_surname ?? "Donor"}') and donee ('${surnameMeta?.donee_surname ?? "Donee"}'). Verify relationship recitals (soft warning only).`}
+            </p>
+          </div>
+        </div>
+      )}
+
       {saveError && (
         <div className="notice notice-error sda-notice">
           <AlertCircle size={15} /> {saveError}
@@ -988,6 +1024,24 @@ function StampDutyAssessmentPanel({
       {editing ? (
         <div className="sda-edit-form">
           <div className="sda-form-grid">
+            <label className="form-label">
+              Selected regime
+              <select value={selectedRule} onChange={(e) => setSelectedRule(e.target.value)}>
+                <option value="article_34_200">Article 34 (₹200 Fixed Concession)</option>
+                <option value="article_34_3_percent">Article 34 (3% Family/Other Property)</option>
+                <option value="article_25">Article 25 (Standard Conveyance)</option>
+                <option value="review_required">Review Required</option>
+              </select>
+            </label>
+
+            <label className="form-label">
+              Location band
+              <select value={locationBand} onChange={(e) => setLocationBand(e.target.value)}>
+                <option value="municipal_corporation_mmr_influence">Municipal Corporation / MMR Influence (5%)</option>
+                <option value="gram_panchayat_other">Gram Panchayat / Rural (4%)</option>
+              </select>
+            </label>
+
             <label className="form-label">
               Property type
               <select value={propertyType} onChange={(e) => setPropertyType(e.target.value)}>
@@ -1004,7 +1058,9 @@ function StampDutyAssessmentPanel({
                 value={relationshipEligibility}
                 onChange={(e) => setRelationshipEligibility(e.target.value)}
               >
-                <option value="eligible">Eligible</option>
+                <option value="eligible">Eligible (General)</option>
+                <option value="article_34_200">Article 34 (₹200 Eligible)</option>
+                <option value="article_34_3_percent">Article 34 (3% Eligible)</option>
                 <option value="not_eligible">Not eligible</option>
                 <option value="ambiguous">Ambiguous</option>
                 <option value="unknown">Unknown</option>
@@ -1086,14 +1142,30 @@ function StampDutyAssessmentPanel({
             <div className="sda-row">
               <div className="sda-field">
                 <span className="sda-label">Donor</span>
-                <span className="sda-val">{assessment?.donor_name || "Not extracted"}</span>
+                <span className="sda-val">
+                  {assessment?.donor_name || "Not extracted"}
+                  {assessment?.donor_role && <small className="sda-sub"> ({humanize(assessment.donor_role)})</small>}
+                </span>
               </div>
               <div className="sda-field">
                 <span className="sda-label">Donee</span>
-                <span className="sda-val">{assessment?.donee_name || "Not extracted"}</span>
+                <span className="sda-val">
+                  {assessment?.donee_name || "Not extracted"}
+                  {assessment?.donee_role && <small className="sda-sub"> ({humanize(assessment.donee_role)})</small>}
+                </span>
               </div>
               <div className="sda-field">
-                <span className="sda-label">Relationship</span>
+                <span className="sda-label">Directional relation</span>
+                <span className="sda-val">
+                  {assessment?.donor_role && assessment?.donee_role
+                    ? `${humanize(assessment.donor_role)} → ${humanize(assessment.donee_role)}`
+                    : assessment?.donee_relation_to_donor
+                    ? `Donee is ${humanize(assessment.donee_relation_to_donor)}`
+                    : "Not parsed"}
+                </span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Relationship (Recital)</span>
                 <span className="sda-val">
                   {assessment?.relationship || "Not stated in recital"}
                   {assessment?.relationship_normalized ? (
@@ -1105,6 +1177,37 @@ function StampDutyAssessmentPanel({
                 <span className="sda-label">Article 34 eligibility</span>
                 <span className={`sda-pill ${assessment?.relationship_eligibility || "unknown"}`}>
                   {humanize(assessment?.relationship_eligibility || "unknown")}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Statutory Regime & Rules */}
+          <div className="sda-section">
+            <div className="sda-section-title">Statutory regime & rule parameters</div>
+            <div className="sda-row">
+              <div className="sda-field">
+                <span className="sda-label">Selected rule</span>
+                <span className="sda-val">
+                  <b>{assessment?.selected_rule ? humanize(assessment.selected_rule) : "Review Required"}</b>
+                  {assessment?.duty_rate && <small className="sda-sub"> (Rate: {assessment.duty_rate})</small>}
+                </span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Location band</span>
+                <span className="sda-val">{assessment?.location_band ? humanize(assessment.location_band) : "Unresolved"}</span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Cess rule</span>
+                <span className="sda-val">
+                  {assessment?.cess_rule ? humanize(assessment.cess_rule) : "N/A"}
+                  {assessment?.cess_uncertain ? " (Uncertain)" : ""}
+                </span>
+              </div>
+              <div className="sda-field">
+                <span className="sda-label">Effective date & version</span>
+                <span className="sda-val">
+                  {assessment?.effective_date || "2017-05-16"} · <code>{assessment?.rule_version || assessment?.legal_rule_version || "MH-ART34-2024.1"}</code>
                 </span>
               </div>
             </div>
@@ -1150,23 +1253,25 @@ function StampDutyAssessmentPanel({
               <div className="sda-stat-box">
                 <span className="sda-label">Base duty</span>
                 <b className="sda-stat-val">{formatCurrency(assessment?.base_stamp_duty ?? 200)}</b>
-                <small>Article 34 concession</small>
+                <small>{assessment?.duty_rate ? `Rate: ${assessment.duty_rate}` : "Concession rate"}</small>
               </div>
               <div className="sda-stat-box">
                 <span className="sda-label">Metro Cess</span>
                 <b className="sda-stat-val">
-                  {assessment?.metro_cess_rate
-                    ? `${formatCurrency(assessment.metro_cess)} (1%)`
+                  {assessment?.metro_cess_rate != null && assessment?.metro_cess_rate > 0
+                    ? `${formatCurrency(assessment.metro_cess)} (${(assessment.metro_cess_rate * 100).toFixed(0)}%)`
                     : assessment?.metro_cess_rate === 0
                       ? "Exempt (0%)"
-                      : "—"}
+                      : assessment?.cess_uncertain
+                        ? "Uncertain"
+                        : "—"}
                 </b>
-                <small>{assessment?.jurisdiction === "non_metro" ? "Non-metro rural" : "Urban / Metro jurisdiction"}</small>
+                <small>{assessment?.cess_rule ? humanize(assessment.cess_rule) : (assessment?.jurisdiction === "non_metro" ? "Non-metro rural" : "Urban / Metro jurisdiction")}</small>
               </div>
               <div className="sda-stat-box highlight">
                 <span className="sda-label">Expected total</span>
                 <b className="sda-stat-val">{formatCurrency(assessment?.expected_total)}</b>
-                <small>Base + Metro Cess</small>
+                <small>{assessment?.cess_uncertain ? "Base only (Cess pending verification)" : "Base + Applicable Cess"}</small>
               </div>
               <div className="sda-stat-box">
                 <span className="sda-label">Actual paid amount</span>
@@ -1223,6 +1328,15 @@ function StampDutyAssessmentPanel({
                     : String(assessment.evidence)}
                 </span>
               </div>
+            )}
+
+            {assessment?.source_evidence && (
+              <details className="sda-evidence-details">
+                <summary>Source Evidence & Audit Trail</summary>
+                <pre className="sda-json-preview">
+                  {JSON.stringify(assessment.source_evidence, null, 2)}
+                </pre>
+              </details>
             )}
 
             {assessment?.reviewer_notes && (

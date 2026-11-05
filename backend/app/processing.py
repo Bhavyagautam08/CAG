@@ -6,7 +6,7 @@ import json
 import shutil
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from PIL import Image, ImageOps
 from pypdf.errors import PdfReadError
@@ -14,6 +14,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .config import (
+    ARTICLE_34_200_RELATIONS,
+    ARTICLE_34_3_PERCENT_FAMILY_RELATIONS,
     ARTICLE_34_ELIGIBLE_RELATIONSHIPS,
     ARTICLE_34_INELIGIBLE_RELATIONSHIPS,
     ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS,
@@ -339,6 +341,253 @@ DONOR_DONEE_RELATIONSHIP_TERMS: dict[str, tuple[str, str]] = {
     "सून": ("सासरा आणि सून", "daughter-in-law"),
 }
 
+ROLE_CANONICAL_MAP: dict[str, str] = {
+    # English
+    "son": "son",
+    "daughter": "daughter",
+    "mother": "mother",
+    "father": "father",
+    "husband": "husband",
+    "wife": "wife",
+    "brother": "brother",
+    "sister": "sister",
+    "grandson": "grandson",
+    "granddaughter": "granddaughter",
+    "grandfather": "grandfather",
+    "grandmother": "grandmother",
+    "uncle": "uncle",
+    "aunt": "aunt",
+    "nephew": "nephew",
+    "niece": "niece",
+    "cousin": "cousin",
+    "cousin brother": "cousin",
+    "cousin sister": "cousin",
+    "wife of deceased son": "wife_of_deceased_son",
+    "wife_of_deceased_son": "wife_of_deceased_son",
+    "parents": "parents",
+    "parent": "parent",
+
+    # Hindi
+    "पुत्र": "son",
+    "बेटा": "son",
+    "सुपुत्र": "son",
+    "पुत्री": "daughter",
+    "बेटी": "daughter",
+    "सुपुत्री": "daughter",
+    "माता": "mother",
+    "माँ": "mother",
+    "पिता": "father",
+    "बाप": "father",
+    "पति": "husband",
+    "पत्नी": "wife",
+    "भाई": "brother",
+    "बहन": "sister",
+    "सगे भाई": "brother",
+    "दादा": "grandfather",
+    "नाना": "grandfather",
+    "दादी": "grandmother",
+    "नानी": "grandmother",
+    "पोता": "grandson",
+    "नाती": "grandson",
+    "पोती": "granddaughter",
+    "नातिन": "granddaughter",
+    "चाचा": "uncle",
+    "मामा": "uncle",
+    "चाची": "aunt",
+    "मामी": "aunt",
+    "भतीजा": "nephew",
+    "भांजा": "nephew",
+    "भतीजी": "niece",
+    "भांजी": "niece",
+    "माता-पिता": "parents",
+    "मृत पुत्र की विधवा": "wife_of_deceased_son",
+
+    # Marathi
+    "मुलगा": "son",
+    "मुलगी": "daughter",
+    "चिरंजीव": "son",
+    "कन्या": "daughter",
+    "सुकन्या": "daughter",
+    "आई": "mother",
+    "मातोश्री": "mother",
+    "वडील": "father",
+    "पती": "husband",
+    "पत्नी": "wife",
+    "भाऊ": "brother",
+    "बंधू": "brother",
+    "बहीण": "sister",
+    "सख्खे बंधू": "brother",
+    "आजोबा": "grandfather",
+    "आजी": "grandmother",
+    "नातू": "grandson",
+    "नात": "granddaughter",
+    "काका": "uncle",
+    "मामा": "uncle",
+    "काकू": "aunt",
+    "मामी": "aunt",
+    "आत्या": "aunt",
+    "मावशी": "aunt",
+    "पुतण्या": "nephew",
+    "भाचा": "nephew",
+    "पुतणी": "niece",
+    "भाची": "niece",
+    "आई-वडील": "parents",
+    "मयत मुलाची विधवा": "wife_of_deceased_son",
+    "दिवंगत पुत्राची पत्नी": "wife_of_deceased_son",
+}
+
+
+def infer_complementary_role(role: str, is_female_hint: bool = False) -> str:
+    r = role.strip().casefold()
+    if r in ("father", "mother", "parents", "parent"):
+        return "daughter" if is_female_hint else "son"
+    elif r in ("son", "daughter"):
+        return "mother" if is_female_hint else "father"
+    elif r == "husband":
+        return "wife"
+    elif r == "wife":
+        return "husband"
+    elif r in ("grandfather", "grandmother"):
+        return "granddaughter" if is_female_hint else "grandson"
+    elif r in ("grandson", "granddaughter"):
+        return "grandmother" if is_female_hint else "grandfather"
+    elif r in ("brother", "sister"):
+        return "sister" if is_female_hint else "brother"
+    elif r in ("uncle", "aunt"):
+        return "niece" if is_female_hint else "nephew"
+    elif r in ("nephew", "niece"):
+        return "aunt" if is_female_hint else "uncle"
+    return r
+
+
+class RelationshipEligibility(str):
+    """
+    Statutory category under Maharashtra Stamp Act Article 34.
+    Provides backward compatibility with legacy 'eligible' / 'not_eligible' comparisons.
+    """
+    def __eq__(self, other: object) -> bool:
+        if str.__eq__(self, str(other)):
+            return True
+        if other == "eligible" and str(self) in ("article_34_200", "article_34_3_percent", "eligible"):
+            return True
+        if other == "not_eligible" and str(self) in ("article_25", "not_eligible"):
+            return True
+        return False
+
+    def __hash__(self) -> int:
+        return str.__hash__(self)
+
+
+class DonorDoneeRelationshipResult(tuple):
+    def __new__(
+        cls,
+        extracted_value: str,
+        normalized_value: str | None,
+        evidence: str,
+        source_page: int,
+        is_ambiguous: bool,
+        donor_role: str | None = None,
+        donee_role: str | None = None,
+        donee_relation_to_donor: str | None = None,
+    ):
+        instance = super().__new__(
+            cls,
+            (
+                extracted_value,
+                normalized_value,
+                evidence,
+                source_page,
+                is_ambiguous,
+            ),
+        )
+        instance.extracted_value = extracted_value
+        instance.normalized_value = normalized_value
+        instance.evidence = evidence
+        instance.source_page = source_page
+        instance.is_ambiguous = is_ambiguous
+        instance.donor_role = donor_role
+        instance.donee_role = donee_role
+        instance.donee_relation_to_donor = donee_relation_to_donor
+        return instance
+
+
+class Article34RelationshipResult(tuple):
+    def __new__(
+        cls,
+        relationship_value: str | None,
+        relationship_normalized: str | None,
+        relationship_eligibility: str,
+        source_page: int,
+        evidence: str,
+        is_ambiguous: bool,
+        donor_role: str | None = None,
+        donee_role: str | None = None,
+        donee_relation_to_donor: str | None = None,
+    ):
+        instance = super().__new__(
+            cls,
+            (
+                relationship_value,
+                relationship_normalized,
+                relationship_eligibility,
+                source_page,
+                evidence,
+                is_ambiguous,
+            ),
+        )
+        instance.relationship_value = relationship_value
+        instance.relationship_normalized = relationship_normalized
+        instance.relationship_eligibility = relationship_eligibility
+        instance.source_page = source_page
+        instance.evidence = evidence
+        instance.is_ambiguous = is_ambiguous
+        instance.donor_role = donor_role
+        instance.donee_role = donee_role
+        instance.donee_relation_to_donor = donee_relation_to_donor
+        return instance
+
+
+class PropertyScheduleResult(tuple):
+    def __new__(
+        cls,
+        property_type: str,
+        property_description: str | None,
+        property_location: str | None,
+        survey_number: str | None,
+        area: str | None,
+        market_value: int | None,
+        is_ambiguous: bool,
+        evidence: str,
+        source_page: int,
+        property_type_uncertain: bool = False,
+    ):
+        instance = super().__new__(
+            cls,
+            (
+                property_type,
+                property_description,
+                property_location,
+                survey_number,
+                area,
+                market_value,
+                is_ambiguous,
+                evidence,
+                source_page,
+            ),
+        )
+        instance.property_type = property_type
+        instance.property_description = property_description
+        instance.property_location = property_location
+        instance.survey_number = survey_number
+        instance.area = area
+        instance.market_value = market_value
+        instance.is_ambiguous = is_ambiguous
+        instance.evidence = evidence
+        instance.source_page = source_page
+        instance.property_type_uncertain = property_type_uncertain
+        return instance
+
+
 DONOR_DONEE_EXPLICIT_PATTERNS = [
     # Explicit header / field label pattern (e.g. "RELATIONSHIP: Parents to Son" or "RELATION: Father and Son")
     r"\b(?:relationship|relation|related\s+as)\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*[:：is-]*\s*([a-zA-Z\s/-]+?)(?=\s*(?:[;.\n]|\bwhereas\b|\band\b|\bnow\b|$))",
@@ -393,31 +642,200 @@ def _extract_sentences(text: str) -> list[str]:
     return sentences
 
 
-def extract_donor_donee_relationship(
+def extract_directional_relationship(
     text_by_page: list[tuple[int, str]],
     donor_name: str | None = None,
     donee_name: str | None = None,
-) -> tuple[str, str | None, str, int, bool]:
+) -> tuple[str | None, str | None, str | None, str, str | None, str, int, bool]:
     """
-    Search recital text for explicit relationship phrases near donor and donee names.
-    Supports English, Hindi, and Marathi phrases.
-    Does not infer relationship merely from shared surnames.
-    Returns: (extracted_value, normalized_value, evidence_sentence, source_page, is_ambiguous)
-    If no explicit relationship is stated, returns extracted_value='not_available'.
+    Explicitly resolves donor -> donee direction:
+    Returns (donor_role, donee_role, donee_relation_to_donor, extracted_value, normalized_value, evidence_sentence, source_page, is_ambiguous).
     """
     if isinstance(text_by_page, str):
         text_by_page = [(1, text_by_page)]
     default_page = text_by_page[0][0] if text_by_page else 1
-    found_candidates: list[tuple[str, str, str, int, bool]] = []
 
     d_first = donor_name.split()[0].casefold() if donor_name and len(donor_name.split()) > 1 else None
     e_first = donee_name.split()[0].casefold() if donee_name and len(donee_name.split()) > 1 else None
+
+    # Check female hints for donee
+    is_female_donee = False
+    if donee_name:
+        dn_lower = donee_name.lower()
+        if any(h in dn_lower for h in ["smt", "mrs", "miss", "kumari", "देवी", "बाई"]):
+            is_female_donee = True
+
+    # Candidates: (donor_role, donee_role, donee_relation_to_donor, disp_val, norm_val, sentence, page_num, is_amb)
+    found_candidates: list[tuple[str | None, str | None, str | None, str, str | None, str, int, bool]] = []
 
     for page_number, page_text in text_by_page:
         sentences = _extract_sentences(page_text)
         for sentence in sentences:
             sentence_cf = sentence.casefold()
 
+            # 1. Direct directional phrases: "son gifts to mother", "mother gifts to son", "father to son", etc.
+            direct_en = re.search(
+                r"\b(son|mother|father|daughter|brother|sister|husband|wife|parents?|grandfather|grandmother|grandson|granddaughter|uncle|aunt|nephew|niece)\s+(?:gifts?(?:\s+to)?|gifting(?:\s+to)?|conveys?(?:\s+to)?|transfers?(?:\s+to)?|executes?\s+gift\s+in\s+favour\s+of|to)\s+(?:to\s+)?(son|mother|father|daughter|brother|sister|husband|wife|parents?|grandfather|grandmother|grandson|granddaughter|uncle|aunt|nephew|niece)\b",
+                sentence,
+                re.IGNORECASE,
+            )
+            if direct_en:
+                d_role = ROLE_CANONICAL_MAP.get(direct_en.group(1).lower())
+                e_role = ROLE_CANONICAL_MAP.get(direct_en.group(2).lower())
+                if d_role and e_role:
+                    disp = f"{d_role.title()} to {e_role.title()}"
+                    norm = f"{d_role} to {e_role}"
+                    found_candidates.append((d_role, e_role, e_role, disp, norm, sentence, page_number, False))
+                    continue
+
+            # Marathi direct directional phrases
+            direct_mr = re.search(
+                r"(मुलगा|मुलगी|मुलानी|मुलाने|आई|आईने|वडील|वडिलांनी|भाऊ|भावाने|बहीण|बहिणीने|पती|पत्नी)\s*(?:ने|कडून)?\s+(आई|वडील|मुलगा|मुलगी|मुलास|मुलीस|आईस|वडिलांस|भाऊ|भावास|बहीण|बहिणीस|पती|पत्नी)(?:ला|स|कडे|ते|\s+केलेले)?",
+                sentence,
+                re.IGNORECASE,
+            )
+            if direct_mr:
+                w1 = direct_mr.group(1).strip()
+                w2 = direct_mr.group(2).strip()
+                d_role = ROLE_CANONICAL_MAP.get(w1)
+                e_role = ROLE_CANONICAL_MAP.get(w2)
+                if not e_role:
+                    # Clean trailing inflection
+                    for base_k in ("आई", "वडील", "मुलगा", "मुलगी", "भाऊ", "बहीण", "पती", "पत्नी"):
+                        if w2.startswith(base_k) or base_k in w2:
+                            e_role = ROLE_CANONICAL_MAP.get(base_k)
+                            break
+                if d_role and e_role:
+                    disp = f"{w1} ते {w2}"
+                    norm = f"{d_role} to {e_role}"
+                    found_candidates.append((d_role, e_role, e_role, disp, norm, sentence, page_number, False))
+                    continue
+
+            # Hindi direct directional phrases
+            direct_hi = re.search(
+                r"(पुत्र|बेटा|माता|पिता|भाई|बहन|पति|पत्नी)\s*(?:द्वारा|से)\s+(माता|पिता|पुत्र|पुत्री|भाई|बहन|पति|पत्नी)\s*(?:को\s+दान|को)?",
+                sentence,
+                re.IGNORECASE,
+            )
+            if direct_hi:
+                d_role = ROLE_CANONICAL_MAP.get(direct_hi.group(1).strip())
+                e_role = ROLE_CANONICAL_MAP.get(direct_hi.group(2).strip())
+                if d_role and e_role:
+                    disp = f"{direct_hi.group(1).strip()} से {direct_hi.group(2).strip()}"
+                    norm = f"{d_role} to {e_role}"
+                    found_candidates.append((d_role, e_role, e_role, disp, norm, sentence, page_number, False))
+                    continue
+
+            # 2. Donor-identified clause: "the Donor is the father of the Donee" / "देणार हा घेणाऱ्याचे वडील आहेत"
+            donor_of_donee = re.search(
+                r"\b(?:the\s+)?donor\s+(?:is|being|referenced\s+as|is\s+also\s+referenced\s+as)\s+(?:the\s+)?(?:real\s+|full\s+|blood\s+|elder\s+|younger\s+)?([a-zA-Z\s-]+?)\s+of\s+(?:the\s+)?(?:donee|recipient)\b",
+                sentence,
+                re.IGNORECASE,
+            )
+            if not donor_of_donee:
+                donor_of_donee = re.search(
+                    r"देणार[ाी]?\s*(?:हा\s+|ही\s+)?(?:घेणाऱ्या|घेणारा)च[ाीे]?\s*([\u0900-\u097F\s-]+?)\s*(?:आहे|असून|असल्याने)",
+                    sentence,
+                    re.IGNORECASE,
+                )
+            if not donor_of_donee:
+                donor_of_donee = re.search(
+                    r"(?:दाता|देने\s*वाले?)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s+के?\s*([\u0900-\u097F\s-]+?)\s*(?:हैं?|होने\s*के\s*नाते)",
+                    sentence,
+                    re.IGNORECASE,
+                )
+            if donor_of_donee:
+                raw_d = donor_of_donee.group(1).strip().casefold()
+                d_role = ROLE_CANONICAL_MAP.get(raw_d)
+                if d_role:
+                    explicit_e = re.search(
+                        r"\b(?:to|towards|for|in\s+favour\s+of)\s+(?:his\s+|her\s+|the\s+)?(?:beloved\s+|dear\s+|real\s+|elder\s+|younger\s+)?(mother|father|son|daughter|brother|sister|wife|husband|parents?|grandfather|grandmother|आई|वडील|माता|पिता|मुलगा|मुलगी)\b",
+                        sentence,
+                        re.IGNORECASE,
+                    )
+                    if explicit_e:
+                        raw_explicit = explicit_e.group(1).strip().casefold()
+                        e_role = ROLE_CANONICAL_MAP.get(raw_explicit)
+                    else:
+                        if d_role in ("mother", "father"):
+                            is_female_hint = is_female_donee or any(f in sentence_cf for f in ["daughter", "मुलगी"])
+                        elif d_role in ("son", "daughter"):
+                            is_female_hint = is_female_donee or any(f in sentence_cf for f in ["mother", "आई", "माता"])
+                        else:
+                            is_female_hint = is_female_donee or any(f in sentence_cf for f in ["mother", "daughter", "sister", "wife", "आई", "माता", "मुलगी", "बहीण", "पत्नी"])
+                        e_role = infer_complementary_role(d_role, is_female_hint)
+                    disp = f"{d_role.title()} and {e_role.title()}"
+                    norm = f"{d_role} and {e_role}"
+                    found_candidates.append((d_role, e_role, e_role, disp, norm, sentence, page_number, False))
+                    continue
+
+            # 3. Donee-identified clause: "the Donee is the son of the Donor" / "घेणार हा देणाराचा मुलगा आहे"
+            donee_of_donor = re.search(
+                r"\b(?:the\s+)?donee\s+(?:is|being|referenced\s+as|is\s+also\s+referenced\s+as)\s+(?:the\s+)?(?:real\s+|full\s+|blood\s+|elder\s+|younger\s+)?([a-zA-Z\s-]+?)\s+of\s+(?:the\s+)?(?:donor|transferor)\b",
+                sentence,
+                re.IGNORECASE,
+            )
+            if not donee_of_donor:
+                donee_of_donor = re.search(
+                    r"घेणार[ाी]?\s*(?:हा\s+|ही\s+)?(?:देणाऱ्या|देणारा)च[ाीे]?\s*([\u0900-\u097F\s-]+?)\s*(?:आहे|असून|असल्याने)",
+                    sentence,
+                    re.IGNORECASE,
+                )
+            if not donee_of_donor:
+                donee_of_donor = re.search(
+                    r"(?:प्राप्तकर्ता|लेने\s*वाले?)\s+(?:दाता|देने\s*वाले?)\s+क[ाेी]?\s*([\u0900-\u097F\s-]+?)\s*(?:हैं?|होने\s*के\s*नाते)",
+                    sentence,
+                    re.IGNORECASE,
+                )
+            if donee_of_donor:
+                raw_e = donee_of_donor.group(1).strip().casefold()
+                e_role = ROLE_CANONICAL_MAP.get(raw_e)
+                if e_role:
+                    explicit_d = re.search(
+                        r"\b(?:by|from)\s+(?:his\s+|her\s+|the\s+)?(mother|father|son|daughter|brother|sister|wife|husband|parents?|grandfather|grandmother|आई|वडील|माता|पिता|मुलगा|मुलगी)\b",
+                        sentence,
+                        re.IGNORECASE,
+                    )
+                    if explicit_d:
+                        raw_explicit_d = explicit_d.group(1).strip().casefold()
+                        d_role = ROLE_CANONICAL_MAP.get(raw_explicit_d)
+                    else:
+                        sentence_female_donor = any(f in sentence_cf for f in ["mother", "daughter", "sister", "wife", "आई", "माता", "मुलगी", "बहीण", "पत्नी"])
+                        d_role = infer_complementary_role(e_role, sentence_female_donor)
+                    disp = f"{d_role.title()} and {e_role.title()}"
+                    norm = f"{d_role} and {e_role}"
+                    found_candidates.append((d_role, e_role, e_role, disp, norm, sentence, page_number, False))
+                    continue
+
+            # 4. Out of natural love and affection towards his/her <RELATION>
+            love_aff = re.search(
+                r"\bout\s+of\s+(?:natural\s+)?love\s+and\s+affection\s+(?:for|towards|to)\s+(?:(?:his|her|the\s+donor'?s)\s+)?([a-zA-Z\s-]+?)(?:\s+(?:the\s+)?donee|\s*[,;.]|\s+desires|\s+transfers|\s+gifts|\s+hereby|\s+executes|$)",
+                sentence,
+                re.IGNORECASE,
+            )
+            if not love_aff:
+                love_aff = re.search(
+                    r"(?:नैसर्गिक|स्वाभाविक)\s+(?:प्रेम\s*(?:व|आणि)\s*जिव्हाळा|प्रेम|जिव्हाळा|लोभ|ममते)(?:पोटी|मुळे|खातर)\s+(?:आपल[ाीे]|त्यांच[ाीे])?\s*([\u0900-\u097F\s-]+?)(?:\s+यास|\s+यांस|\s+यांना|\s*[,;.]|$)",
+                    sentence,
+                    re.IGNORECASE,
+                )
+            if not love_aff:
+                love_aff = re.search(
+                    r"(?:स्वाभाविक|प्राकृतिक)\s+(?:प्रेम\s*(?:और|व)\s*स्नेह|प्रेम|स्नेह)\s*(?:के\s+कारण|वश)\s+(?:अपने|अपनी)\s*([\u0900-\u097F\s-]+?)(?:\s+को|\s*[,;.]|$)",
+                    sentence,
+                    re.IGNORECASE,
+                )
+            if love_aff:
+                raw_e = love_aff.group(1).strip().casefold()
+                e_role = ROLE_CANONICAL_MAP.get(raw_e)
+                if e_role:
+                    d_role = infer_complementary_role(e_role)
+                    disp = f"{d_role.title()} and {e_role.title()}"
+                    norm = f"{d_role} and {e_role}"
+                    found_candidates.append((d_role, e_role, e_role, disp, norm, sentence, page_number, False))
+                    continue
+
+            # 5. General explicit patterns
             matched_in_sentence = False
             for pat in DONOR_DONEE_EXPLICIT_PATTERNS:
                 m = re.search(pat, sentence, re.IGNORECASE)
@@ -433,14 +851,56 @@ def extract_donor_donee_relationship(
                     )
                     if norm_entry:
                         disp_val, norm_val = norm_entry
-                        found_candidates.append((disp_val, norm_val, sentence, page_number, False))
+                        # Infer roles from norm_val
+                        d_r = None
+                        e_r = None
+                        e_rel = None
+                        if "father and son" in norm_val:
+                            d_r, e_r, e_rel = "father", "son", "son"
+                        elif "father and daughter" in norm_val:
+                            d_r, e_r, e_rel = "father", "daughter", "daughter"
+                        elif "mother and son" in norm_val:
+                            d_r, e_r, e_rel = "mother", "son", "son"
+                        elif "mother and daughter" in norm_val:
+                            d_r, e_r, e_rel = "mother", "daughter", "daughter"
+                        elif "husband and wife" in norm_val:
+                            d_r, e_r, e_rel = "husband", "wife", "wife"
+                        elif "brother and sister" in norm_val:
+                            d_r, e_r, e_rel = "brother", "sister", "sister"
+                        elif "brothers" in norm_val:
+                            d_r, e_r, e_rel = "brother", "brother", "brother"
+                        elif "sisters" in norm_val:
+                            d_r, e_r, e_rel = "sister", "sister", "sister"
+                        elif "parents and son" in norm_val:
+                            d_r, e_r, e_rel = "father", "son", "son"
+                        elif "parents and daughter" in norm_val:
+                            d_r, e_r, e_rel = "mother", "daughter", "daughter"
+                        elif "grandfather and grandson" in norm_val:
+                            d_r, e_r, e_rel = "grandfather", "grandson", "grandson"
+                        elif "grandfather and granddaughter" in norm_val:
+                            d_r, e_r, e_rel = "grandfather", "granddaughter", "granddaughter"
+                        elif "uncle and nephew" in norm_val:
+                            d_r, e_r, e_rel = "uncle", "nephew", "nephew"
+                        elif "uncle and niece" in norm_val:
+                            d_r, e_r, e_rel = "uncle", "niece", "niece"
+                        elif "daughter-in-law" in norm_val:
+                            d_r, e_r, e_rel = "father", "wife_of_deceased_son", "wife_of_deceased_son"
+                        else:
+                            # Single term
+                            mapped_role = ROLE_CANONICAL_MAP.get(norm_val.lower().strip())
+                            if mapped_role:
+                                e_rel = mapped_role
+                                e_r = mapped_role
+                                d_r = infer_complementary_role(mapped_role)
+
+                        found_candidates.append((d_r, e_r, e_rel, disp_val, norm_val, sentence, page_number, False))
                         matched_in_sentence = True
                         break
 
             if matched_in_sentence:
                 continue
 
-            # If donor_name and donee_name given, check if sentence mentions both with a relation
+            # 6. Mentions both donor and donee names with a relationship term
             if d_first and e_first and d_first in sentence_cf and e_first in sentence_cf:
                 name_rel = re.search(
                     r"\b(father|mother|son|daughter|brother|sister|husband|wife|वडील|आई|मुलगा|मुलगी|भाऊ|बहीण|पिता|माता|पुत्र|पुत्री)\b",
@@ -452,19 +912,24 @@ def extract_donor_donee_relationship(
                     norm_entry = DONOR_DONEE_RELATIONSHIP_TERMS.get(raw_term)
                     if norm_entry:
                         disp_val, norm_val = norm_entry
-                        found_candidates.append((disp_val, norm_val, sentence, page_number, False))
+                        r_can = ROLE_CANONICAL_MAP.get(raw_term, "son")
+                        d_r = infer_complementary_role(r_can)
+                        found_candidates.append((d_r, r_can, r_can, disp_val, norm_val, sentence, page_number, False))
                         continue
 
-            # Check vague terms (only if sentence context mentions donor/donee/parties/gift)
+            # 7. Vague patterns
             if any(term in sentence_cf for term in ["donor", "donee", "parties", "दाता", "प्राप्तकर्ता", "देणार", "घेणार"]):
                 for vpat in DONOR_DONEE_VAGUE_PATTERNS:
                     vm = re.search(vpat, sentence, re.IGNORECASE)
                     if vm:
-                        found_candidates.append(("Near Relatives", "near relatives", sentence, page_number, True))
+                        found_candidates.append((None, None, None, "Near Relatives", "near relatives", sentence, page_number, True))
                         break
 
     if not found_candidates:
         return (
+            None,
+            None,
+            None,
             "not_available",
             None,
             "No explicit donor-donee relationship found in recital text; verify the source page.",
@@ -472,17 +937,187 @@ def extract_donor_donee_relationship(
             False,
         )
 
-    non_vague = [c for c in found_candidates if not c[4]]
+    non_vague = [c for c in found_candidates if not c[7]]
     if non_vague:
-        norm_values = {c[1] for c in non_vague}
+        norm_values = {c[4] for c in non_vague}
         if len(norm_values) > 1:
-            all_disp = ", ".join(dict.fromkeys(c[0] for c in non_vague))
-            ev = non_vague[0][2]
-            pg = non_vague[0][3]
-            return (f"Ambiguous: {all_disp}", "ambiguous", ev, pg, True)
-        return non_vague[0]
+            all_disp = ", ".join(dict.fromkeys(c[3] for c in non_vague))
+            ev = non_vague[0][5]
+            pg = non_vague[0][6]
+            return (None, None, None, f"Ambiguous: {all_disp}", "ambiguous", ev, pg, True)
+        c = non_vague[0]
+        return (c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7])
 
-    return found_candidates[0]
+    c = found_candidates[0]
+    return (c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7])
+
+
+def extract_donor_donee_relationship(
+    text_by_page: list[tuple[int, str]],
+    donor_name: str | None = None,
+    donee_name: str | None = None,
+) -> tuple[str, str | None, str, int, bool]:
+    """
+    Search recital text for explicit relationship phrases near donor and donee names.
+    Supports English, Hindi, and Marathi phrases.
+    Does not infer relationship merely from shared surnames.
+    Returns DonorDoneeRelationshipResult unpacking as:
+    (extracted_value, normalized_value, evidence_sentence, source_page, is_ambiguous)
+    with attached attributes: donor_role, donee_role, donee_relation_to_donor.
+    """
+    d_role, e_role, e_rel, disp_val, norm_val, ev, pg, is_amb = extract_directional_relationship(
+        text_by_page, donor_name=donor_name, donee_name=donee_name
+    )
+    return DonorDoneeRelationshipResult(
+        disp_val, norm_val, ev, pg, is_amb, donor_role=d_role, donee_role=e_role, donee_relation_to_donor=e_rel
+    )
+
+
+NAME_HONORIFICS: tuple[str, ...] = (
+    "mr", "mrs", "ms", "miss", "shri", "shree", "smt", "shrimati", "sau", "adv", "advocate",
+    "dr", "doctor", "late", "kumar", "kumari", "master",
+    "श्री", "श्रीमती", "सौ", "कु", "कुमारी", "डॉ", "अ‍ॅड", "अॅड", "वकील", "कै", "कैलासवासी", "स्व", "स्वर्गीय", "मा", "माजी"
+)
+
+MARRIED_FEMALE_HONORIFICS: tuple[str, ...] = (
+    "mrs", "smt", "shrimati", "sau", "सौ", "श्रीमती"
+)
+
+MAIDEN_OR_MARRIED_NAME_INDICATORS: tuple[str, ...] = (
+    r"\b(?:née|nee)\b",
+    r"\balias\b",
+    r"\b(?:w/o|d/o|wife\s+of|daughter\s+of)\b",
+    r"पूर्वीचे\s*नाव",
+    r"माहेरचे\s*नाव",
+    r"लग्नानंतरचे\s*नाव",
+    r"विवाहपूर्व\s*नाव",
+    r"\bउर्फ\b",
+    r"विवाहित",
+)
+
+OCR_NOISE_IN_NAME_PATTERN = re.compile(r"[@!#$%\^*~{}\\\[\]|<>=_0-9]")
+
+
+def check_donor_donee_surname_risk(
+    donor_name: str | None,
+    donee_name: str | None,
+    ocr_confidence: float | None = None,
+    relationship_context: dict[str, Any] | str | None = None,
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """
+    Evaluates whether a soft finding `donor_donee_surname_mismatch` should be raised.
+    Normalizes names (strips titles/honorifics and punctuation) and extracts surname tokens.
+    Never infers a family relationship merely from matching surnames.
+
+    Suppresses/exempts finding when:
+      - Either name is missing or unavailable.
+      - Either name consists of a single word or initials.
+      - OCR uncertainty/damage is detected on the name fields.
+      - Married-name change indicators exist (married female donee/donor, 'née', 'पूर्वीचे नाव', 'लग्नानंतरचे नाव').
+
+    Returns:
+      (has_mismatch, explanation, metadata)
+    """
+    if not donor_name or not donee_name:
+        return False, None, {"suppressed": True, "reason": "missing_or_unavailable_name"}
+
+    d_raw = str(donor_name).strip()
+    e_raw = str(donee_name).strip()
+    if d_raw.lower() in ("unknown", "not_available", "none", "") or e_raw.lower() in ("unknown", "not_available", "none", ""):
+        return False, None, {"suppressed": True, "reason": "missing_or_unavailable_name"}
+
+    # 1. OCR uncertainty or damage detection
+    if ocr_confidence is not None:
+        try:
+            conf_val = float(ocr_confidence)
+            if conf_val <= 1.0 and conf_val < 0.70:
+                return False, None, {"suppressed": True, "reason": "low_ocr_confidence", "confidence": conf_val}
+            elif conf_val > 1.0 and conf_val < 70.0:
+                return False, None, {"suppressed": True, "reason": "low_ocr_confidence", "confidence": conf_val}
+        except (ValueError, TypeError):
+            pass
+
+    if OCR_NOISE_IN_NAME_PATTERN.search(d_raw) or OCR_NOISE_IN_NAME_PATTERN.search(e_raw):
+        return False, None, {"suppressed": True, "reason": "ocr_damage_or_noise_in_names"}
+
+    # 2. Married-name / maiden-name change indicators
+    combined_context_text = f"{d_raw} {e_raw}"
+    if relationship_context:
+        if isinstance(relationship_context, dict):
+            combined_context_text += " " + " ".join(str(v) for v in relationship_context.values())
+        else:
+            combined_context_text += " " + str(relationship_context)
+
+    for pat in MAIDEN_OR_MARRIED_NAME_INDICATORS:
+        if re.search(pat, combined_context_text, re.IGNORECASE):
+            return False, None, {"suppressed": True, "reason": "maiden_or_married_name_indicator_found"}
+
+    # 3. Clean, strip honorifics and tokenize
+    def _extract_tokens_and_honorifics(name_str: str) -> tuple[list[str], list[str]]:
+        raw_words = [
+            w.strip(".,;:'\"()[]{}<>/-")
+            for w in re.split(r"[\s,;:.()/-]+", name_str)
+            if w.strip(".,;:'\"()[]{}<>/-")
+        ]
+        hons: list[str] = []
+        clean_words: list[str] = []
+        for w in raw_words:
+            w_cf = w.casefold()
+            if w_cf in NAME_HONORIFICS:
+                hons.append(w_cf)
+            else:
+                clean_words.append(w)
+        return clean_words, hons
+
+    d_tokens, d_hons = _extract_tokens_and_honorifics(d_raw)
+    e_tokens, e_hons = _extract_tokens_and_honorifics(e_raw)
+
+    # 4. Check single word or initials
+    if len(d_tokens) < 2 or len(e_tokens) < 2:
+        return False, None, {"suppressed": True, "reason": "single_word_name"}
+
+    if any(len(t) <= 1 for t in (d_tokens[-1], e_tokens[-1])) or all(len(t) <= 1 for t in d_tokens) or all(len(t) <= 1 for t in e_tokens):
+        return False, None, {"suppressed": True, "reason": "initials_only_name"}
+
+    # 5. Married female donee/donor indicators (e.g. Smt, Mrs, Sau, or relationship is daughter/sister/wife)
+    has_married_female_honorific = any(h in MARRIED_FEMALE_HONORIFICS for h in d_hons + e_hons)
+    is_married_female_relation = False
+    if relationship_context:
+        if isinstance(relationship_context, dict):
+            d_rel = str(relationship_context.get("donee_relation_to_donor") or relationship_context.get("donee_role") or "").casefold()
+            if d_rel in ("daughter", "मुलगी", "sister", "बहीण", "wife", "पत्नी", "wife_of_deceased_son"):
+                is_married_female_relation = True
+        else:
+            rc_cf = str(relationship_context).casefold()
+            if any(r in rc_cf for r in ("daughter", "मुलगी", "sister", "बहीण", "wife", "पत्नी")):
+                is_married_female_relation = True
+
+    if has_married_female_honorific or is_married_female_relation:
+        return False, None, {"suppressed": True, "reason": "married_female_name_change"}
+
+    # 6. Compare extracted surnames
+    d_surname = d_tokens[-1]
+    e_surname = e_tokens[-1]
+
+    if d_surname.casefold() == e_surname.casefold():
+        # NEVER infer a family relationship merely from matching surnames.
+        return False, None, {
+            "suppressed": False,
+            "matches": True,
+            "donor_surname": d_surname,
+            "donee_surname": e_surname,
+        }
+
+    explanation = (
+        f"Surname mismatch detected between donor (\"{d_surname}\") and donee (\"{e_surname}\"). "
+        "Verify relationship evidence against deed recitals."
+    )
+    return True, explanation, {
+        "suppressed": False,
+        "matches": False,
+        "donor_surname": d_surname,
+        "donee_surname": e_surname,
+    }
 
 
 DEVANAGARI_DIGITS_MAP = str.maketrans("०१२३४५६७८९", "0123456789")
@@ -542,7 +1177,32 @@ OTHER_PROPERTY_TERMS: tuple[str, ...] = (
 )
 
 SCHEDULE_HEADER_PATTERNS = [
-    r"(?:\bschedule\s*(?:of\s*(?:the\s*)?property)?\b|परिशिष्ट|मिळकतीचे\s*वर्णन|मिळकत\s*वर्णन|चतुःसीमा|description\s+of\s+(?:the\s+)?property)",
+    r"(?:\bthe\s+)?\bschedule\s*(?:of\s*(?:the\s*)?property)?\b",
+    r"\bschedule\s*['\"]?[a-zA-Z0-9०-९]?['\"]?",
+    r"\bannexure\s*['\"]?[a-zA-Z0-9०-९]?['\"]?",
+    r"परिशिष्ट\s*['\"]?[अआइईउऊकखगघa-zA-Z0-9०-९]?['\"]?",
+    r"मिळकतीचे\s*वर्णन",
+    r"मिळकत\s*वर्णन",
+    r"चतुःसीमा",
+    r"चतुःसिमा",
+    r"description\s+of\s+(?:the\s+)?property",
+    r"property\s+description",
+    r"संपत्ति\s*का\s*विवरण",
+]
+
+SCHEDULE_END_PATTERNS = [
+    r"\b(?:in\s+witness\s+whereof|witnesses?|witnesseth|signatures?|memo\s+of\s+consideration|receipt)\b",
+    r"(?:साक्षीदार|स्वाक्षरी|पावती|दस्तऐवज\s*लिहून\s*देणार)",
+]
+
+MULTIPLE_PROPERTY_SCHEDULE_PATTERNS = [
+    r"\b(?:property|item|parcel)\s*(?:no\.?|number)?\s*[:#-]?\s*(?:2|ii|two|२)\b",
+    r"\b(?:second|2nd)\s+property\b",
+    r"\bschedule\s*['\"]?[b2]['\"]?\b",
+    r"\bannexure\s*['\"]?[b2]['\"]?\b",
+    r"परिशिष्ट\s*['\"]?[ब2२]['\"]?",
+    r"मिळकत\s*(?:क्र\.?|क्रमांक)?\s*[:#-]?\s*[२2]",
+    r"दुसरी\s*मिळकत|द्वितीय\s*मिळकत",
 ]
 
 MARKET_VALUE_PATTERNS = [
@@ -574,13 +1234,50 @@ def extract_property_schedule(
     text_by_page: list[tuple[int, str]],
 ) -> tuple[str, str | None, str | None, str | None, str | None, int | None, bool, str, int]:
     """
-    Scans page texts for Schedule of Property and recital descriptions.
-    Returns:
+    Scans page texts for Schedule of Property and restricts property-type evidence
+    extraction (residential, agricultural, commercial, other_property) to the document's
+    Schedule / Annexure block when present, rather than scanning general recitals across
+    the entire document.
+
+    Detects if multiple distinct properties are listed in the schedule or if the schedule
+    property type is ambiguous, and sets property_type_uncertain = True.
+
+    Returns PropertyScheduleResult unpacking as:
     (property_type, property_description, property_location, survey_number, area, market_value, is_ambiguous_property_type, evidence, source_page)
+    with property_type_uncertain accessible as an attribute.
     """
     if isinstance(text_by_page, str):
         text_by_page = [(1, text_by_page)]
     default_page = text_by_page[0][0] if text_by_page else 1
+
+    # Flatten all lines with page number
+    all_lines: list[tuple[int, str]] = []
+    for page_num, text in text_by_page:
+        for line in text.splitlines():
+            line_str = line.strip()
+            if line_str:
+                all_lines.append((page_num, line_str))
+
+    # Identify if a Schedule / Annexure header is present
+    schedule_start_idx: int | None = None
+    for i, (pg, l_str) in enumerate(all_lines):
+        if any(re.search(pat, l_str, re.IGNORECASE) for pat in SCHEDULE_HEADER_PATTERNS):
+            schedule_start_idx = i
+            break
+
+    has_schedule_header = schedule_start_idx is not None
+    if has_schedule_header:
+        # Delimit the schedule block lines
+        schedule_end_idx = len(all_lines)
+        for j in range(schedule_start_idx + 1, len(all_lines)):
+            pg, l_str = all_lines[j]
+            if any(re.search(end_pat, l_str, re.IGNORECASE) for end_pat in SCHEDULE_END_PATTERNS):
+                schedule_end_idx = j
+                break
+        schedule_lines = all_lines[schedule_start_idx:schedule_end_idx]
+    else:
+        schedule_lines = all_lines
+
     agri_matches: list[tuple[int, str, str]] = []
     res_matches: list[tuple[int, str, str]] = []
     other_matches: list[tuple[int, str, str]] = []
@@ -592,107 +1289,183 @@ def extract_property_schedule(
     areas: list[tuple[int, str]] = []
     market_values: list[tuple[int, int, str]] = []
 
-    for page_num, text in text_by_page:
-        lines = text.splitlines()
-        for idx, line in enumerate(lines):
-            line_str = line.strip()
-            if not line_str:
-                continue
-            line_cf = line_str.casefold()
+    # 1. Scoped property type search restricted strictly to schedule_lines
+    for page_num, line_str in schedule_lines:
+        line_cf = line_str.casefold()
 
-            is_header = any(re.search(pat, line_str, re.IGNORECASE) for pat in SCHEDULE_HEADER_PATTERNS)
-            if is_header:
-                desc_snippet = " ".join(lines[idx:idx+4]).strip()
-                if desc_snippet:
-                    descriptions.append((page_num, desc_snippet[:500]))
+        is_header = any(re.search(pat, line_str, re.IGNORECASE) for pat in SCHEDULE_HEADER_PATTERNS)
+        if is_header:
+            descriptions.append((page_num, line_str[:500]))
 
-            for term in AGRICULTURAL_PRIMARY_TERMS:
-                if term in line_cf:
-                    agri_matches.append((page_num, term, line_str))
+        for term in AGRICULTURAL_PRIMARY_TERMS:
+            if term in line_cf:
+                agri_matches.append((page_num, term, line_str))
 
-            for term in RESIDENTIAL_PRIMARY_TERMS:
-                pattern = rf"\b{re.escape(term)}\b" if len(term) < 6 and term.isascii() else re.escape(term)
-                if re.search(pattern, line_cf):
-                    res_matches.append((page_num, term, line_str))
+        for term in RESIDENTIAL_PRIMARY_TERMS:
+            pattern = rf"\b{re.escape(term)}\b" if len(term) < 6 and term.isascii() else re.escape(term)
+            if re.search(pattern, line_cf):
+                res_matches.append((page_num, term, line_str))
 
-            for term in OTHER_PROPERTY_TERMS:
-                pattern = rf"\b{re.escape(term)}\b" if len(term) < 6 and term.isascii() else re.escape(term)
-                if re.search(pattern, line_cf):
-                    other_matches.append((page_num, term, line_str))
+        for term in OTHER_PROPERTY_TERMS:
+            pattern = rf"\b{re.escape(term)}\b" if len(term) < 6 and term.isascii() else re.escape(term)
+            if re.search(pattern, line_cf):
+                other_matches.append((page_num, term, line_str))
 
-            for term in AGRICULTURAL_SUPPORTING_INDICATORS:
-                if term in line_cf:
-                    supporting_agri_matches.append((page_num, term, line_str))
+        for term in AGRICULTURAL_SUPPORTING_INDICATORS:
+            if term in line_cf:
+                supporting_agri_matches.append((page_num, term, line_str))
 
-            survey_match = re.search(
-                r"(?:\bsurvey\s*(?:no\.?|number)?|\bgat\s*(?:no\.?|number)?|गट\s*क्रमांक|गा\.?\s*नं\.?|ग\.\s*नं\.?|सर्व्हे\s*(?:नंबर|नं\.?))\s*[:#-]?\s*([A-Z0-9०-९][A-Z0-9०-९/-]*)",
-                line_str,
-                re.IGNORECASE,
-            ) or re.search(FIELD_PATTERNS["survey_number"], line_str, re.IGNORECASE)
-            if survey_match:
-                survey_numbers.append((page_num, survey_match.group(1).strip()))
+        survey_match = re.search(
+            r"(?:\bsurvey\s*(?:no\.?|number)?|\bgat\s*(?:no\.?|number)?|गट\s*क्रमांक|गा\.?\s*नं\.?|ग\.\s*नं\.?|सर्व्हे\s*(?:नंबर|नं\.?))\s*[:#-]?\s*([A-Z0-9०-९][A-Z0-9०-९/-]*)",
+            line_str,
+            re.IGNORECASE,
+        ) or re.search(FIELD_PATTERNS["survey_number"], line_str, re.IGNORECASE)
+        if survey_match:
+            survey_numbers.append((page_num, survey_match.group(1).strip()))
 
-            area_match = re.search(FIELD_PATTERNS["property_area"], line_str, re.IGNORECASE)
-            if area_match:
-                areas.append((page_num, area_match.group(1).strip()))
+        area_match = re.search(FIELD_PATTERNS["property_area"], line_str, re.IGNORECASE)
+        if area_match:
+            areas.append((page_num, area_match.group(1).strip()))
 
-            loc_match = re.search(
-                r"(?:at\s+village|village|taluka|district|मौजे|गाव|तालुका|जिल्हा)\s*[:：-]?\s*([A-Za-z\u0900-\u097F\s,.-]{3,60})",
+        loc_match = re.search(
+            r"(?:at\s+village|village|taluka|district|मौजे|गाव|तालुका|जिल्हा)\s*[:：-]?\s*([A-Za-z\u0900-\u097F\s,.-]{3,60})",
+            line_str,
+            re.IGNORECASE,
+        )
+        if loc_match:
+            locations.append((page_num, loc_match.group(0).strip()[:200]))
+        else:
+            simple_loc = re.search(
+                r"\b(?:at|in|near|येथे)\s+([A-Za-z\u0900-\u097F\s,.-]{3,50})",
                 line_str,
                 re.IGNORECASE,
             )
-            if loc_match:
-                locations.append((page_num, loc_match.group(0).strip()[:200]))
+            if simple_loc:
+                locations.append((page_num, simple_loc.group(0).strip()[:200]))
 
-            for mv_pat in MARKET_VALUE_PATTERNS:
-                mvm = re.search(mv_pat, line_str, re.IGNORECASE)
-                if mvm:
-                    amt = parse_indian_currency_amount(mvm.group(1))
-                    if amt:
-                        market_values.append((page_num, amt, line_str[:300]))
+        for mv_pat in MARKET_VALUE_PATTERNS:
+            mvm = re.search(mv_pat, line_str, re.IGNORECASE)
+            if mvm:
+                amt = parse_indian_currency_amount(mvm.group(1))
+                if amt:
+                    market_values.append((page_num, amt, line_str[:300]))
+
+    # Fallback for locations, survey numbers, and areas across all lines if schedule lacked them
+    if not survey_numbers or not locations or not areas:
+        for page_num, line_str in all_lines:
+            if not survey_numbers:
+                s_m = re.search(FIELD_PATTERNS["survey_number"], line_str, re.IGNORECASE)
+                if s_m:
+                    survey_numbers.append((page_num, s_m.group(1).strip()))
+            if not locations:
+                l_m = re.search(r"(?:at\s+village|village|taluka|district|मौजे|गाव|तालुका|जिल्हा)\s*[:：-]?\s*([A-Za-z\u0900-\u097F\s,.-]{3,60})", line_str, re.IGNORECASE)
+                if l_m:
+                    locations.append((page_num, l_m.group(0).strip()[:200]))
+            if not areas:
+                a_m = re.search(FIELD_PATTERNS["property_area"], line_str, re.IGNORECASE)
+                if a_m:
+                    areas.append((page_num, a_m.group(1).strip()))
 
     has_agri = len(agri_matches) > 0
     has_res = len(res_matches) > 0
     has_other = len(other_matches) > 0
 
-    if has_agri and has_res:
+    # Detect if multiple distinct properties are listed in schedule
+    schedule_text_cf = " \n ".join(l[1] for l in schedule_lines).casefold()
+    has_multiple_property_headers = any(
+        re.search(pat, schedule_text_cf, re.IGNORECASE) for pat in MULTIPLE_PROPERTY_SCHEDULE_PATTERNS
+    )
+
+    property_type_uncertain = False
+    if has_multiple_property_headers:
         property_type = "unknown"
         is_ambiguous = True
+        property_type_uncertain = True
+        evidence = f"Multiple distinct properties listed in schedule; evidence: {schedule_lines[0][1][:300]}"
+        source_page = schedule_lines[0][0]
+    elif has_agri and has_res:
+        property_type = "unknown"
+        is_ambiguous = True
+        property_type_uncertain = True
         evidence = f"Mixed primary terms: Agri ({[m[1] for m in agri_matches]}) and Res ({[m[1] for m in res_matches]})"
         source_page = agri_matches[0][0]
+    elif (has_agri and has_other) or (has_res and has_other):
+        property_type = "unknown"
+        is_ambiguous = True
+        property_type_uncertain = True
+        evidence = f"Mixed primary terms in schedule; Agri: {has_agri}, Res: {has_res}, Other: {has_other}"
+        source_page = (agri_matches or res_matches or other_matches)[0][0]
     elif has_agri:
         property_type = "agricultural_land"
         is_ambiguous = False
+        property_type_uncertain = False
         evidence = f"Agricultural primary terms: {[m[1] for m in agri_matches]}; evidence: {agri_matches[0][2][:300]}"
         source_page = agri_matches[0][0]
     elif has_res:
         property_type = "residential_property"
         is_ambiguous = False
+        property_type_uncertain = False
         evidence = f"Residential primary terms: {[m[1] for m in res_matches]}; evidence: {res_matches[0][2][:300]}"
         source_page = res_matches[0][0]
     elif has_other:
         property_type = "other_property"
         is_ambiguous = False
+        property_type_uncertain = False
         evidence = f"Other property terms: {[m[1] for m in other_matches]}; evidence: {other_matches[0][2][:300]}"
         source_page = other_matches[0][0]
     elif supporting_agri_matches:
         property_type = "unknown"
         is_ambiguous = False
+        property_type_uncertain = True
         evidence = f"Supporting indicators only (survey/gat without primary terms): {[m[1] for m in supporting_agri_matches]}"
         source_page = supporting_agri_matches[0][0]
     else:
         property_type = "unknown"
         is_ambiguous = False
-        evidence = "No property terms found in schedule or recitals"
+        property_type_uncertain = True
+        evidence = "No property terms found in schedule block"
         source_page = default_page
 
-    prop_desc = descriptions[0][1] if descriptions else (agri_matches[0][2] if agri_matches else (res_matches[0][2] if res_matches else None))
+    sched_content_lines: list[str] = []
+    for _, l_str in schedule_lines:
+        matched_hdr = False
+        for pat in SCHEDULE_HEADER_PATTERNS:
+            m = re.search(pat, l_str, re.IGNORECASE)
+            if m:
+                matched_hdr = True
+                remainder = l_str[m.end():].strip().lstrip(":- ").strip()
+                if remainder and len(remainder) > 3:
+                    sched_content_lines.append(remainder)
+                break
+        if not matched_hdr:
+            if not any(re.search(pat, l_str, re.IGNORECASE) for pat in MARKET_VALUE_PATTERNS) and \
+               not any(re.search(pat, l_str, re.IGNORECASE) for pat in TOTAL_STAMP_DUTY_PATTERNS + BASE_STAMP_DUTY_PATTERNS) and \
+               not re.search(r"^\s*challan\s*(?:no\.?|number)?\b", l_str, re.IGNORECASE):
+                sched_content_lines.append(l_str)
+
+    if sched_content_lines:
+        prop_desc = " \n ".join(sched_content_lines)[:1000]
+    elif descriptions:
+        prop_desc = descriptions[0][1]
+    else:
+        prop_desc = agri_matches[0][2] if agri_matches else (res_matches[0][2] if res_matches else (other_matches[0][2] if other_matches else None))
     prop_loc = locations[0][1] if locations else None
     surv_no = survey_numbers[0][1] if survey_numbers else None
     prop_area = areas[0][1] if areas else None
     mv = market_values[0][1] if market_values else None
 
-    return (property_type, prop_desc, prop_loc, surv_no, prop_area, mv, is_ambiguous, evidence, source_page)
+    return PropertyScheduleResult(
+        property_type,
+        prop_desc,
+        prop_loc,
+        surv_no,
+        prop_area,
+        mv,
+        is_ambiguous,
+        evidence,
+        source_page,
+        property_type_uncertain=property_type_uncertain,
+    )
 
 
 def extract_market_value(
@@ -743,49 +1516,106 @@ def extract_market_value(
     return None, False, "No market value found in deed text", default_page, False
 
 
+def select_stamp_duty_rule(
+    donee_relation_to_donor: str | None,
+    property_type: str | None,
+    property_type_uncertain: bool = False,
+    is_relationship_ambiguous: bool = False,
+    has_conflicting_mv: bool = False,
+    has_conflicting_duty: bool = False,
+) -> str:
+    """
+    Deterministic rule selector for Maharashtra Stamp Act gift deeds.
+    Returns one of:
+      - 'article_34_200'
+      - 'article_34_3_percent'
+      - 'article_25'
+      - 'review_required'
+    """
+    if property_type_uncertain or is_relationship_ambiguous or has_conflicting_mv or has_conflicting_duty:
+        return "review_required"
+
+    if not donee_relation_to_donor or donee_relation_to_donor in ("unknown", "ambiguous", "not_available"):
+        return "review_required"
+
+    if not property_type or property_type in ("unknown", "ambiguous"):
+        return "review_required"
+
+    rel = donee_relation_to_donor.strip().casefold().replace("-", "_").replace(" ", "_")
+    prop = property_type.strip().casefold()
+    is_res_or_agri = prop in ("residential", "residential_property", "agricultural", "agricultural_land")
+
+    if rel in ARTICLE_34_200_RELATIONS:
+        if is_res_or_agri:
+            return "article_34_200"
+        else:
+            return "article_34_3_percent"
+    elif rel in ARTICLE_34_3_PERCENT_FAMILY_RELATIONS:
+        return "article_34_3_percent"
+    else:
+        return "article_25"
+
+
 def evaluate_article_34_relationship(
     text_by_page: list[tuple[int, str]],
     donor_name: str | None = None,
     donee_name: str | None = None,
 ) -> tuple[str | None, str | None, str, int, str, bool]:
     """
-    Evaluates Article 34 relationship eligibility.
-    Returns:
+    Evaluates Article 34 relationship eligibility and resolves directional roles.
+    Splits the old broad "eligible" status into distinct statutory categories under
+    Maharashtra Stamp Act Article 34:
+      - ARTICLE_34_200_RELATIONS: {"husband", "wife", "son", "daughter", "grandson", "granddaughter", "wife_of_deceased_son"}
+      - ARTICLE_34_3_PERCENT_FAMILY_RELATIONS: {"father", "mother", "brother", "sister"}
+    Returns Article34RelationshipResult unpacking as:
     (relationship_value, relationship_normalized, relationship_eligibility, source_page, evidence, is_ambiguous)
-    Where relationship_eligibility is 'eligible' | 'not_eligible' | 'unknown' | 'ambiguous'.
+    with attached attributes: donor_role, donee_role, donee_relation_to_donor.
     """
-    rel_val, rel_norm, rel_ev, rel_page, is_amb = extract_donor_donee_relationship(
+    d_role, e_role, e_rel, rel_val, rel_norm, rel_ev, rel_page, is_amb = extract_directional_relationship(
         text_by_page, donor_name=donor_name, donee_name=donee_name
     )
 
     if rel_val == "not_available" or not rel_norm:
-        return None, None, "unknown", rel_page, rel_ev, False
+        return Article34RelationshipResult(
+            None, None, RelationshipEligibility("unknown"), rel_page, rel_ev, False, d_role, e_role, e_rel
+        )
 
     if is_amb or rel_norm == "ambiguous" or rel_norm in ("near relatives", "relative"):
-        return rel_val, "ambiguous", "ambiguous", rel_page, rel_ev, True
+        return Article34RelationshipResult(
+            rel_val, "ambiguous", RelationshipEligibility("ambiguous"), rel_page, rel_ev, True, d_role, e_role, e_rel
+        )
 
     norm_clean = rel_norm.casefold().strip().replace("-", "_").replace(" ", "_")
     mapped = ARTICLE_34_RELATIONSHIP_LEXICAL_MAPPINGS.get(rel_norm.casefold().strip(), norm_clean)
     mapped_clean = mapped.casefold().strip().replace("-", "_").replace(" ", "_")
 
-    is_eligible = (
-        mapped_clean in ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS
-        or norm_clean in ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS
-        or rel_norm.casefold() in [k.casefold() for k in ARTICLE_34_ELIGIBLE_RELATIONSHIPS]
-    )
+    # If e_rel wasn't resolved by directional parser, infer from mapped_clean
+    if not e_rel:
+        if mapped_clean in ARTICLE_34_200_RELATIONS or mapped_clean in ("father_and_son", "father_and_daughter", "mother_and_son", "mother_and_daughter", "parents_and_son", "parents_and_daughter"):
+            if "daughter" in mapped_clean:
+                e_rel = "daughter"
+                d_role = "father"
+            else:
+                e_rel = "son"
+                d_role = "father"
+        elif mapped_clean in ARTICLE_34_3_PERCENT_FAMILY_RELATIONS or mapped_clean in ("brother_and_brother", "sister_and_sister", "brother_and_sister"):
+            e_rel = "brother"
+            d_role = "brother"
+        else:
+            e_rel = mapped_clean
 
-    is_ineligible = (
-        mapped_clean in [k.replace("-", "_").replace(" ", "_").casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS]
-        or norm_clean in [k.replace("-", "_").replace(" ", "_").casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS]
-        or rel_norm.casefold() in [k.casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS]
-    )
-
-    if is_eligible and not is_ineligible:
-        return rel_val, mapped_clean, "eligible", rel_page, rel_ev, False
-    elif is_ineligible:
-        return rel_val, mapped_clean, "not_eligible", rel_page, rel_ev, False
+    if e_rel in ARTICLE_34_200_RELATIONS:
+        rel_elig = RelationshipEligibility("article_34_200")
+    elif e_rel in ARTICLE_34_3_PERCENT_FAMILY_RELATIONS:
+        rel_elig = RelationshipEligibility("article_34_3_percent")
+    elif mapped_clean in [k.replace("-", "_").replace(" ", "_").casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS] or e_rel in [k.replace("-", "_").replace(" ", "_").casefold() for k in ARTICLE_34_INELIGIBLE_RELATIONSHIPS]:
+        rel_elig = RelationshipEligibility("article_25")
     else:
-        return rel_val, mapped_clean, "not_eligible", rel_page, rel_ev, False
+        rel_elig = RelationshipEligibility("article_25")
+
+    return Article34RelationshipResult(
+        rel_val, mapped_clean, rel_elig, rel_page, rel_ev, False, d_role, e_role, e_rel
+    )
 
 
 def extract_stamp_duty_paid(
@@ -875,6 +1705,189 @@ def extract_stamp_duty_paid(
     return (base_paid, metro_paid, total_paid, challan_no, has_conflicts, evidence, page)
 
 
+MUNICIPAL_CORP_KEYWORDS: tuple[str, ...] = (
+    "municipal corporation",
+    "mahanagarpalika",
+    "महानगरपालिका",
+    "mcgm",
+    "bmc",
+    "pmc",
+    "pcmc",
+    "nmc",
+    "tmc",
+    "kdmc",
+    "nmmc",
+    "mbmc",
+    "vvcmc",
+)
+
+METRO_MMR_CITIES: tuple[str, ...] = (
+    "mumbai",
+    "mumbai suburban",
+    "bombay",
+    "brihanmumbai",
+    "thane",
+    "navi mumbai",
+    "pune",
+    "pimpri",
+    "chinchwad",
+    "nagpur",
+    "nashik",
+    "kalyan",
+    "dombivli",
+    "vasai",
+    "virar",
+    "mira bhayandar",
+    "ulhasnagar",
+    "aurangabad",
+    "chhatrapati sambhajinagar",
+    "solapur",
+    "kolhapur",
+    "amravati",
+    "nanded",
+    "मुंबई",
+    "ठाणे",
+    "नवी मुंबई",
+    "पुणे",
+    "पिंपरी",
+    "चिंचवड",
+    "नागपूर",
+    "नाशिक",
+    "कल्याण",
+    "डोंबिवली",
+    "वसई",
+    "विरार",
+    "मीरा भाईंदर",
+    "छत्रपती संभाजीनगर",
+    "सोलापूर",
+    "कोल्हापूर",
+    "अमरावती",
+    "नांदेड",
+)
+
+GRAM_PANCHAYAT_KEYWORDS: tuple[str, ...] = (
+    "gram panchayat",
+    "grampanchayat",
+    "village panchayat",
+    "gramin",
+    "rural",
+    "ग्रामपंचायत",
+    "ग्रामीण",
+)
+
+RURAL_TALUKAS: tuple[str, ...] = (
+    "baramati",
+    "बारामती",
+    "indapur",
+    "इंदापूर",
+    "daund",
+    "दौंड",
+    "junnar",
+    "जुन्नर",
+    "ambegaon",
+    "आंबेगाव",
+    "shirur",
+    "शिरूर",
+    "bhor",
+    "भोर",
+    "velhe",
+    "वेल्हे",
+)
+
+
+def resolve_authoritative_location_band(
+    prop_loc: str | None,
+    schedule_text: str | None = None,
+    reg_summary: str | None = None,
+) -> tuple[str | None, str, bool, str]:
+    """
+    Authoritatively determines location band and cess jurisdiction strictly from
+    authoritative property-location fields:
+      - schedule village / ULB / taluka / district / corporation (prop_loc, schedule_text)
+      - registration summary / identifier (reg_summary)
+    NEVER scans loose body-text recitals or witness signatures.
+
+    Returns:
+      (location_band, jurisdiction, cess_uncertain, evidence)
+    Where:
+      location_band: 'municipal_corporation_mmr_influence' (5%), 'gram_panchayat_other' (4%), or None
+      jurisdiction: 'metro', 'non_metro', or 'unknown'
+      cess_uncertain: True if jurisdiction/cess cannot be verified authoritatively
+      evidence: explanatory text showing the matched location term or uncertainty reason
+    """
+    auth_parts = [p.strip() for p in (prop_loc, reg_summary, schedule_text) if p and p.strip()]
+    if not auth_parts:
+        return (
+            None,
+            "unknown",
+            True,
+            "No authoritative property location found in schedule or registration summary",
+        )
+
+    auth_text = " ".join(auth_parts).casefold()
+
+    # Generic or state-only without municipality or gram panchayat
+    cleaned_tokens = [w for w in re.split(r"[\s,;:.()/-]+", auth_text) if w]
+    generic_words = {
+        "maharashtra", "state", "residential", "flat", "property", "premises", "land",
+        "agricultural", "commercial", "in", "at", "of", "the", "situated", "description",
+        "schedule", "annexure", "open", "parcel", "plot", "unit", "deed", "gift", "reg",
+        "registration", "ref", "no", "number", "sq", "ft", "g", "गट", "सर्व्हे", "क्षेत्र",
+        "महाराष्ट्र", "राज्य", "मिळकत", "वर्णन", "परिशिष्ट", "दस्त", "नोंदणी", "क्रमांक"
+    }
+    state_only = all(tok in generic_words or tok.isdigit() for tok in cleaned_tokens)
+    if state_only:
+        return (
+            None,
+            "unknown",
+            True,
+            "Authoritative property location only specifies state or generic terms without a recognizable municipality or gram panchayat",
+        )
+
+    # 1. Check for explicit Municipal Corporation terms first
+    has_corp_term = any(k in auth_text for k in MUNICIPAL_CORP_KEYWORDS)
+    if has_corp_term:
+        matched_corp = next(k for k in MUNICIPAL_CORP_KEYWORDS if k in auth_text)
+        return (
+            "municipal_corporation_mmr_influence",
+            "metro",
+            False,
+            f"Authoritative location explicitly specifies Municipal Corporation: '{matched_corp}'",
+        )
+
+    # 2. Check for explicit Gram Panchayat / rural talukas
+    has_gp = any(k in auth_text for k in GRAM_PANCHAYAT_KEYWORDS)
+    has_rural_taluka = any(k in auth_text for k in RURAL_TALUKAS)
+
+    if has_gp or has_rural_taluka:
+        matched_rural = next((k for k in GRAM_PANCHAYAT_KEYWORDS if k in auth_text), None) or next((k for k in RURAL_TALUKAS if k in auth_text), None)
+        return (
+            "gram_panchayat_other",
+            "non_metro",
+            False,
+            f"Authoritative location specifies Gram Panchayat / rural jurisdiction: '{matched_rural}'",
+        )
+
+    # 3. Check for Metro / Corporation Influence Cities (e.g. Pune, Mumbai, Thane, etc.)
+    has_metro_city = any(k in auth_text for k in METRO_MMR_CITIES)
+    if has_metro_city:
+        matched_city = next(k for k in METRO_MMR_CITIES if k in auth_text)
+        return (
+            "municipal_corporation_mmr_influence",
+            "metro",
+            False,
+            f"Authoritative location specifies MMR / Municipal Corporation city: '{matched_city}'",
+        )
+
+    # 4. If neither could be verified definitively
+    return (
+        None,
+        "unknown",
+        True,
+        "Authoritative location could not be definitively resolved to Municipal Corporation or Gram Panchayat",
+    )
+
+
 def assess_stamp_duty_article_34(
     document: LogicalDocument,
     text_by_page: list[tuple[int, str]],
@@ -889,35 +1902,41 @@ def assess_stamp_duty_article_34(
     donor_name = next((f.extracted_value for f in document.fields if f.field_name == "donor_name"), None)
     donee_name = next((f.extracted_value for f in document.fields if f.field_name == "donee_name"), None)
 
-    rel_val, rel_norm, rel_elig, rel_page, rel_ev, rel_is_amb = evaluate_article_34_relationship(
+    rel_res = evaluate_article_34_relationship(
         text_by_page, donor_name=donor_name, donee_name=donee_name
     )
+    rel_val, rel_norm, rel_elig, rel_page, rel_ev, rel_is_amb = rel_res[:6]
+    donor_role = getattr(rel_res, "donor_role", None)
+    donee_role = getattr(rel_res, "donee_role", None)
+    donee_relation_to_donor = getattr(rel_res, "donee_relation_to_donor", None)
+
     if rel_elig == "unknown" and all_pages:
         all_text_by_page = [
             (p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "")
             for p in all_pages
         ]
-        fb_val, fb_norm, fb_elig, fb_page, fb_ev, fb_amb = evaluate_article_34_relationship(
+        fb_res = evaluate_article_34_relationship(
             all_text_by_page, donor_name=donor_name, donee_name=donee_name
         )
-        if fb_elig != "unknown":
-            rel_val, rel_norm, rel_elig, rel_page, rel_ev, rel_is_amb = fb_val, fb_norm, fb_elig, fb_page, fb_ev, fb_amb
+        if fb_res[2] != "unknown":
+            rel_val, rel_norm, rel_elig, rel_page, rel_ev, rel_is_amb = fb_res[:6]
+            donor_role = getattr(fb_res, "donor_role", donor_role)
+            donee_role = getattr(fb_res, "donee_role", donee_role)
+            donee_relation_to_donor = getattr(fb_res, "donee_relation_to_donor", donee_relation_to_donor)
 
-    prop_type, prop_desc, prop_loc, surv_no, prop_area, sched_mv, prop_is_amb, prop_ev, prop_page = (
-        extract_property_schedule(text_by_page)
-    )
-    if prop_type == "unknown" and not prop_is_amb and all_pages:
+    prop_res = extract_property_schedule(text_by_page)
+    prop_type, prop_desc, prop_loc, surv_no, prop_area, sched_mv, prop_is_amb, prop_ev, prop_page = prop_res[:9]
+    prop_uncertain = getattr(prop_res, "property_type_uncertain", prop_is_amb)
+
+    if prop_type == "unknown" and not prop_uncertain and all_pages:
         all_text_by_page = [
             (p.page_number, p.ocr_text_corrected or p.ocr_text_original or p.digital_text or "")
             for p in all_pages
         ]
-        fb_type, fb_desc, fb_loc, fb_surv, fb_area, fb_mv, fb_amb, fb_ev, fb_page = extract_property_schedule(
-            all_text_by_page
-        )
-        if fb_type != "unknown" or fb_amb:
-            prop_type, prop_desc, prop_loc, surv_no, prop_area, sched_mv, prop_is_amb, prop_ev, prop_page = (
-                fb_type, fb_desc, fb_loc, fb_surv, fb_area, fb_mv, fb_amb, fb_ev, fb_page
-            )
+        fb_prop = extract_property_schedule(all_text_by_page)
+        if fb_prop[0] != "unknown" or getattr(fb_prop, "property_type_uncertain", fb_prop[6]):
+            prop_type, prop_desc, prop_loc, surv_no, prop_area, sched_mv, prop_is_amb, prop_ev, prop_page = fb_prop[:9]
+            prop_uncertain = getattr(fb_prop, "property_type_uncertain", prop_is_amb)
 
     mv, has_conflicting_mv, mv_ev, mv_page, mv_is_assessed_fallback = extract_market_value(text_by_page)
     if mv is None and not has_conflicting_mv and all_pages:
@@ -931,24 +1950,21 @@ def assess_stamp_duty_article_34(
     if mv is None and sched_mv is not None and not has_conflicting_mv:
         mv = sched_mv
 
-    combined_text = " ".join(t for _, t in text_by_page).casefold()
-    loc_text = (prop_loc or "").casefold()
+    # Extract registration summary for authoritative location evidence if present
+    reg_no = next((f.extracted_value for f in document.fields if f.field_name == "registration_number"), None)
+    if not reg_no:
+        for pg, l_str in text_by_page:
+            reg_m = re.search(FIELD_PATTERNS["registration_number"], l_str, re.IGNORECASE)
+            if reg_m:
+                reg_no = reg_m.group(1).strip()
+                break
 
-    is_non_metro = any(ind in loc_text or ind in combined_text for ind in NON_METRO_INDICATORS)
-    is_metro = any(j in loc_text or j in combined_text for j in METRO_CESS_JURISDICTIONS)
-
-    if prop_type == "agricultural_land":
-        jurisdiction = "non_metro" if is_non_metro else ("metro" if is_metro else "non_metro")
-        is_metro_cess_applicable = False
-    elif is_non_metro:
-        jurisdiction = "non_metro"
-        is_metro_cess_applicable = False
-    elif is_metro:
-        jurisdiction = "metro"
-        is_metro_cess_applicable = True
-    else:
-        jurisdiction = "unknown"
-        is_metro_cess_applicable = False
+    # Strictly authoritative location extraction (schedule location / schedule text / registration summary)
+    location_band, jurisdiction, cess_uncertain, loc_evidence = resolve_authoritative_location_band(
+        prop_loc=prop_loc,
+        schedule_text=prop_desc,
+        reg_summary=reg_no,
+    )
 
     base_paid, metro_paid, total_paid, challan_no, has_conflicting_duty, duty_ev, duty_page = (
         extract_stamp_duty_paid(text_by_page)
@@ -966,101 +1982,187 @@ def assess_stamp_duty_article_34(
                 fb_base, fb_metro, fb_total, fb_ch, fb_conf_duty, fb_duty_ev, fb_duty_page
             )
 
-    base_duty = int(STAMP_DUTY_BASE_AMOUNT)
-    metro_cess_rate = float(STAMP_DUTY_METRO_CESS_RATE) if is_metro_cess_applicable else 0.0
+    # 3. Three-Regime Deterministic Selector
+    selected_rule = select_stamp_duty_rule(
+        donee_relation_to_donor=donee_relation_to_donor,
+        property_type=prop_type,
+        property_type_uncertain=prop_uncertain,
+        is_relationship_ambiguous=rel_is_amb or (rel_elig == "ambiguous"),
+        has_conflicting_mv=has_conflicting_mv,
+        has_conflicting_duty=has_conflicting_duty,
+    )
+
+    base_duty: int | None = None
+    duty_rate: str | None = None
+    cess_rule: str | None = None
+    metro_cess_rate: float | None = None
     metro_cess_amount: int | None = None
     expected_total: int | None = None
+    expected_base_duty_float: float | None = None
+    expected_duty_amount: int | None = None
+    total_payable: int | None = None
     difference: int | None = None
     status = "requires_review"
     status_reason = ""
 
-    if rel_elig == "not_eligible" or prop_type == "other_property":
-        status = "not_applicable"
-        status_reason = (
-            f"Article 34 concessional rate is not applicable: "
-            f"Relationship '{rel_val}' (eligibility: {rel_elig}) or Property Type '{prop_type}' "
-            "does not qualify for family gift deed concession. Standard conveyance stamp duty applies."
-        )
-        base_duty = None
+    # Evaluate cess strictly on verified location; no automatic exemption for agricultural property
+    if cess_uncertain:
         metro_cess_rate = None
         metro_cess_amount = None
-        expected_total = None
-        difference = None
-    elif rel_is_amb or prop_is_amb or has_conflicting_mv or has_conflicting_duty:
-        status = "requires_review"
-        reasons = []
-        if rel_is_amb:
-            reasons.append(f"Ambiguous relationship in recital: {rel_val}")
-        if prop_is_amb:
-            reasons.append("Ambiguous / mixed property type in schedule")
-        if has_conflicting_mv:
-            reasons.append("Conflicting market values extracted across pages")
-        if has_conflicting_duty:
-            reasons.append("Conflicting stamp duty paid amounts across pages")
-        status_reason = "; ".join(reasons)
-        if mv is not None and not has_conflicting_mv:
-            metro_cess = (Decimal(mv) * Decimal(str(metro_cess_rate))).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
-            )
-            metro_cess_amount = int(metro_cess)
-            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
-    elif rel_elig == "unknown":
-        status = "not_available"
-        status_reason = "No explicit donor-donee relationship found in recital text. Article 34 eligibility cannot be confirmed."
-    elif prop_type == "unknown":
-        status = "requires_review"
-        status_reason = "Property type in Schedule of Property could not be classified as residential or agricultural."
+        cess_rule = "jurisdiction_uncertain"
+    elif jurisdiction == "metro":
+        metro_cess_rate = float(STAMP_DUTY_METRO_CESS_RATE)
+        metro_cess_amount = (
+            int((Decimal(mv) * Decimal(str(metro_cess_rate))).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            if mv is not None
+            else None
+        )
+        cess_rule = "metro_cess_1_percent"
+    else:  # non_metro
+        metro_cess_rate = 0.0
+        metro_cess_amount = 0
+        cess_rule = "non_metro_exempt"
+
+    if selected_rule == "article_34_200":
+        duty_rate = "200_fixed"
+        base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+        expected_duty_amount = base_duty
+        if cess_uncertain:
+            expected_total = None
+        else:
+            expected_total = base_duty + (metro_cess_amount or 0)
+        total_payable = expected_total
+
+    elif selected_rule == "article_34_3_percent":
+        duty_rate = "3%"
         if mv is not None:
-            metro_cess = (Decimal(mv) * Decimal(str(metro_cess_rate))).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
+            expected_base_duty_float = round(float(mv) * 0.03, 2)
+            base_duty = int((Decimal(mv) * Decimal("0.03")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            expected_duty_amount = base_duty
+            if cess_uncertain:
+                expected_total = None
+            else:
+                expected_total = base_duty + (metro_cess_amount or 0)
+        else:
+            base_duty = None
+            expected_duty_amount = None
+            expected_total = None
+        total_payable = expected_total
+
+    elif selected_rule == "article_25":
+        if location_band == "municipal_corporation_mmr_influence":
+            duty_rate = "5%"
+            if mv is not None:
+                expected_duty_amount = int((Decimal(mv) * Decimal("0.05")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                base_duty = expected_duty_amount
+            else:
+                base_duty = None
+                expected_duty_amount = None
+        elif location_band == "gram_panchayat_other":
+            duty_rate = "4%"
+            if mv is not None:
+                expected_duty_amount = int((Decimal(mv) * Decimal("0.04")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                base_duty = expected_duty_amount
+            else:
+                base_duty = None
+                expected_duty_amount = None
+        else:
+            duty_rate = "review_required"
+            base_duty = None
+            expected_duty_amount = None
+
+        if base_duty is not None and not cess_uncertain:
+            total_payable = base_duty + (metro_cess_amount or 0)
+            expected_total = total_payable
+        else:
+            total_payable = None
+            expected_total = None
+
+    else:  # review_required
+        duty_rate = "review_required"
+        if rel_elig in ("article_34_200", "eligible"):
+            base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+            expected_duty_amount = base_duty
+        if not cess_uncertain and mv is not None and metro_cess_amount is not None:
+            if base_duty:
+                expected_total = base_duty + metro_cess_amount
+                total_payable = expected_total
+
+    # Status evaluation
+    if selected_rule == "review_required":
+        if rel_elig == "unknown":
+            status = "not_available"
+            status_reason = "No explicit donor-donee relationship found in recital text. Article 34 eligibility cannot be confirmed."
+        else:
+            status = "requires_review"
+            reasons = []
+            if rel_is_amb or rel_elig == "ambiguous":
+                reasons.append(f"Ambiguous relationship in recital: {rel_val}")
+            if prop_uncertain:
+                reasons.append("Ambiguous / mixed or multiple distinct properties in schedule")
+            if prop_type == "unknown":
+                reasons.append("Property type in Schedule of Property could not be classified")
+            if has_conflicting_mv:
+                reasons.append("Conflicting market values extracted across pages")
+            if has_conflicting_duty:
+                reasons.append("Conflicting stamp duty paid amounts across pages")
+            if cess_uncertain:
+                reasons.append("Cess applicability cannot be verified from authoritative location evidence; manual review required.")
+            status_reason = "; ".join(reasons) or "Critical assessment inputs are uncertain; manual review required."
+
+    elif selected_rule == "article_25":
+        art25_uncertain_reasons = []
+        if not location_band:
+            art25_uncertain_reasons.append("Authoritative property location could not be resolved to a definite location band (Municipal Corporation 5% vs Gram Panchayat 4%); manual review required.")
+        if cess_uncertain:
+            art25_uncertain_reasons.append("Cess applicability cannot be verified from authoritative location evidence; manual review required.")
+        if mv is None:
+            art25_uncertain_reasons.append("Declared market value was not found in property schedule or recitals; required to compute Article 25 conveyance stamp duty.")
+        if prop_uncertain or prop_type in ("unknown", "ambiguous"):
+            art25_uncertain_reasons.append("Property type in Schedule of Property could not be classified or contains multiple distinct properties.")
+        if rel_is_amb or rel_elig in ("unknown", "ambiguous"):
+            art25_uncertain_reasons.append(f"Ambiguous relationship in recital: {rel_val}")
+
+        if art25_uncertain_reasons:
+            status = "requires_review"
+            status_reason = "; ".join(art25_uncertain_reasons)
+        else:
+            if total_paid is not None and expected_total is not None:
+                difference = total_paid - expected_total
+            status = "not_applicable"
+            diff_text = f", difference: ₹{difference:,}" if difference is not None else ""
+            status_reason = (
+                f"Article 34 concessional rate is not applicable: "
+                f"Relationship '{rel_val}' does not qualify for family gift deed concession. "
+                f"Article 25 standard conveyance applies at {duty_rate} (Location band: {location_band}). "
+                f"Total payable: ₹{expected_total:,}, actual paid: ₹{(total_paid or 0):,}{diff_text}."
             )
-            metro_cess_amount = int(metro_cess)
-            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
-    elif jurisdiction == "unknown" and prop_type != "agricultural_land":
+
+    elif cess_uncertain:
         status = "requires_review"
-        status_reason = "Metro Cess jurisdiction could not be determined from property location. Review whether metro cess applies."
-        if mv is not None:
-            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-            metro_cess_amount = int(metro_cess)
-            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
-    elif mv is None:
+        status_reason = "Cess applicability cannot be verified from authoritative location evidence; manual review required."
+
+    elif mv is None or expected_total is None:
         status = "not_available"
         status_reason = "Declared market value was not found in the property schedule or recitals. Required to calculate stamp duty and metro cess."
+
     elif total_paid is None:
-        if is_metro_cess_applicable:
-            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
-            )
-            metro_cess_amount = int(metro_cess)
-            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
-        else:
-            metro_cess_amount = 0
-            expected_total = int(STAMP_DUTY_BASE_AMOUNT)
         status = "not_available"
         status_reason = f"Expected total duty ₹{expected_total:,}, but no stamp duty payment was extracted to compare."
-    else:
-        if is_metro_cess_applicable:
-            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
-            )
-            metro_cess_amount = int(metro_cess)
-            expected_total = int(STAMP_DUTY_BASE_AMOUNT) + metro_cess_amount
-        else:
-            metro_cess_amount = 0
-            expected_total = int(STAMP_DUTY_BASE_AMOUNT)
 
+    else:
         difference = total_paid - expected_total
         if difference >= 0:
             status = "compliant"
             status_reason = (
-                f"Compliant under Article 34. Paid ₹{total_paid:,} meets or exceeds expected ₹{expected_total:,} "
-                f"(Base: ₹{base_duty} + Metro Cess: ₹{metro_cess_amount:,})."
+                f"Compliant under {selected_rule.upper().replace('_', ' ')}. Paid ₹{total_paid:,} meets or exceeds expected ₹{expected_total:,} "
+                f"(Base: ₹{base_duty:,} + Cess: ₹{(metro_cess_amount or 0):,})."
             )
         else:
             status = "short_paid"
             status_reason = (
-                f"Short paid under Article 34 by ₹{abs(difference):,}. Expected ₹{expected_total:,} "
-                f"(Base: ₹{base_duty} + Metro Cess: ₹{metro_cess_amount:,}), but actual paid is ₹{total_paid:,}."
+                f"Short paid under {selected_rule.upper().replace('_', ' ')} by ₹{abs(difference):,}. Expected ₹{expected_total:,} "
+                f"(Base: ₹{base_duty:,} + Cess: ₹{(metro_cess_amount or 0):,}), but actual paid is ₹{total_paid:,}."
             )
 
     source_pages_set = {rel_page, prop_page, mv_page, duty_page}
@@ -1069,6 +2171,66 @@ def assess_stamp_duty_article_34(
     evidence_summary = (
         f"Recital: {rel_ev}; Property: {prop_ev}; Valuation: {mv_ev}; Payment: {duty_ev}"
     )[:2000]
+
+    calc_components = {
+        "selected_rule": selected_rule,
+        "duty_rate": duty_rate,
+        "base_duty_amount": base_duty,
+        "market_value": mv,
+        "location_band": location_band,
+        "cess_uncertain": cess_uncertain,
+        "cess_rule": cess_rule,
+        "metro_cess_rate": metro_cess_rate,
+        "metro_cess_amount": metro_cess_amount,
+        "expected_total": expected_total,
+        "total_stamp_duty_paid": total_paid,
+        "difference": difference,
+        "surname_mismatch": False,
+    }
+
+    # Evaluate surname mismatch risk as soft finding only
+    has_surname_mismatch, surname_explanation, surname_meta = check_donor_donee_surname_risk(
+        donor_name=donor_name,
+        donee_name=donee_name,
+        ocr_confidence=getattr(document, "confidence_proxy", None),
+        relationship_context={
+            "donor_role": donor_role,
+            "donee_role": donee_role,
+            "donee_relation_to_donor": donee_relation_to_donor,
+            "relationship": rel_val,
+            "relationship_eligibility": str(rel_elig),
+        },
+    )
+    calc_components["surname_mismatch"] = has_surname_mismatch
+
+    source_evidence_dict = {
+        "directional_relationship": {
+            "donor_role": donor_role,
+            "donee_role": donee_role,
+            "donee_relation_to_donor": donee_relation_to_donor,
+            "raw_text": rel_val,
+            "evidence": rel_ev,
+            "source_page": rel_page,
+        },
+        "surname_risk": surname_meta,
+        "property_schedule": {
+            "property_type": prop_type,
+            "property_type_uncertain": prop_uncertain,
+            "evidence": prop_ev,
+            "source_page": prop_page,
+        },
+        "valuation": {
+            "market_value": mv,
+            "evidence": mv_ev,
+            "source_page": mv_page,
+        },
+        "payment": {
+            "total_paid": total_paid,
+            "challan_number": challan_no,
+            "evidence": duty_ev,
+            "source_page": duty_page,
+        },
+    }
 
     assessment = None
     if db:
@@ -1084,15 +2246,28 @@ def assess_stamp_duty_article_34(
 
     assessment.donor_name = donor_name
     assessment.donee_name = donee_name
+    assessment.donor_role = donor_role
+    assessment.donee_role = donee_role
+    assessment.donee_relation_to_donor = donee_relation_to_donor
     assessment.relationship = rel_val
     assessment.relationship_normalized = rel_norm
-    assessment.relationship_eligibility = rel_elig
+    assessment.relationship_eligibility = RelationshipEligibility(rel_elig)
     assessment.property_type = prop_type
+    assessment.property_type_uncertain = prop_uncertain
     assessment.property_description = prop_desc
     assessment.property_location = prop_loc
     assessment.survey_number = surv_no
     assessment.area = prop_area
     assessment.jurisdiction = jurisdiction
+    assessment.location_band = location_band
+    assessment.cess_uncertain = cess_uncertain
+    assessment.selected_rule = selected_rule
+    assessment.duty_rate = duty_rate
+    assessment.cess_rule = cess_rule
+    assessment.rule_version = STAMP_DUTY_RULE_VERSION
+    assessment.effective_date = STAMP_DUTY_EFFECTIVE_FROM
+    assessment.calculation_components = json.dumps(calc_components)
+    assessment.source_evidence = json.dumps(source_evidence_dict)
     assessment.market_value = mv
     assessment.base_duty = base_duty
     assessment.metro_cess_rate = metro_cess_rate
@@ -1245,11 +2420,25 @@ def assess_stamp_duty_article_34(
             )
         )
 
+    if has_surname_mismatch and surname_explanation:
+        findings_list.append(
+            ValidationFinding(
+                case_id=case_id,
+                document_id=document.id,
+                rule_id="donor_donee_surname_mismatch",
+                severity="low",
+                kind="identity_verification",
+                explanation=surname_explanation,
+                evidence=f"Donor: {donor_name}; Donee: {donee_name}",
+                source_pages=source_pages_str,
+            )
+        )
+
     assessment.findings_list = findings_list
     if db:
         existing_new_rules = {
             f.rule_id
-            for f in db.new
+            for f in getattr(db, "new", set())
             if isinstance(f, ValidationFinding) and f.document_id == document.id
         }
         for f in findings_list:
@@ -1781,6 +2970,7 @@ def refresh_ingestion_extraction(db: Session, ingestion_id: str) -> dict[str, in
                     "missing_market_value",
                     "missing_stamp_duty_paid",
                     "metro_cess_jurisdiction_unknown",
+                    "donor_donee_surname_mismatch",
                 ]),
             )
         )

@@ -987,7 +987,15 @@ def test_stamp_duty_assessment_serialization_and_endpoint():
     assert sda["donee_name"] == "Suresh Kulkarni"
     assert sda["property_type"] == "residential_property"
     assert "son" in sda["relationship"].lower()
-    assert sda["relationship_eligibility"] == "eligible"
+    assert sda["relationship_eligibility"] in {"eligible", "article_34_200"}
+    assert sda["donor_role"] == "father"
+    assert sda["donee_role"] == "son"
+    assert sda["donee_relation_to_donor"] == "son"
+    assert sda["selected_rule"] == "article_34_200"
+    assert sda["duty_rate"] == "200_fixed"
+    assert sda["cess_rule"] == "metro_cess_1_percent"
+    assert sda["calculation_components"] is not None
+    assert sda["source_evidence"] is not None
     assert sda["market_value"] == 2500000
     assert sda["base_stamp_duty"] == 200
     assert sda["metro_cess_rate"] == 0.01
@@ -1068,11 +1076,13 @@ def test_stamp_duty_assessment_serialization_and_endpoint():
         f"/api/documents/{doc['id']}/stamp-duty-assessment",
         json={
             "property_type": "agricultural_land",
+            "jurisdiction": "non_metro",
+            "location_band": "gram_panchayat_other",
             "market_value": 4000000,
             "stamp_duty_paid": 200,
             "total_stamp_duty_paid": 200,
             "review_status": "confirmed",
-            "reviewer_notes": "Reviewer confirmed agricultural land classification; 0% metro cess applied.",
+            "reviewer_notes": "Reviewer confirmed agricultural land classification in rural non-metro area; 0% metro cess applied.",
         },
     )
     assert override_resp.status_code == 200

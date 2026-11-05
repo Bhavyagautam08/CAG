@@ -399,6 +399,35 @@ a{color:inherit;text-decoration:none}
   text-transform: uppercase;
   margin-bottom: 2px;
 }
+.sda-evidence-details {
+  margin-top: 6px;
+  background: #ffffff;
+  border: 1px solid #e9edf3;
+  border-radius: 5px;
+  padding: 6px 8px;
+  font-size: 9.5px;
+}
+.sda-evidence-details summary {
+  font-size: 8.5px;
+  font-weight: 700;
+  color: #5d6e85;
+  text-transform: uppercase;
+  cursor: pointer;
+  outline: none;
+}
+.sda-json-preview {
+  margin: 6px 0 0;
+  padding: 6px;
+  background: #f8fafc;
+  border-radius: 4px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 9px;
+  color: #334155;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
 .sda-edit-form {
   padding: 0 17px 14px;
 }

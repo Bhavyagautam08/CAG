@@ -124,6 +124,19 @@ export interface DashboardData {
   failed_jobs: number;
 }
 
+export interface Finding {
+  id: string;
+  case_id: string | null;
+  document_id: string | null;
+  rule_id: string;
+  severity: string;
+  kind: string;
+  explanation: string;
+  evidence: string | null;
+  source_pages: string | null;
+  review_status: string;
+}
+
 export interface Document {
   id: string;
   ingestion_id: string;
@@ -140,6 +153,7 @@ export interface Document {
   case_link_evidence: string | null;
   fields: Field[];
   pages?: Page[];
+  findings?: Finding[];
   stamp_duty_assessment?: StampDutyAssessment | null;
 }
 
@@ -148,7 +162,13 @@ export interface StampDutyAssessment {
   document_id: string | number;
   donor_name: string | null;
   donee_name: string | null;
+  donor_role?: string | null;
+  donee_role?: string | null;
+  donee_relation_to_donor?: string | null;
   property_type: string;
+  property_type_uncertain?: boolean;
+  cess_uncertain?: boolean;
+  location_band?: string | null;
   property_description: string | null;
   property_location: string | null;
   survey_number: string | null;
@@ -157,6 +177,13 @@ export interface StampDutyAssessment {
   relationship_normalized: string | null;
   relationship_eligibility: "eligible" | "not_eligible" | "unknown" | "ambiguous" | string;
   jurisdiction: string;
+  selected_rule?: "article_34_200" | "article_34_3_percent" | "article_25" | "review_required" | string | null;
+  duty_rate?: string | null;
+  cess_rule?: string | null;
+  rule_version?: string | null;
+  effective_date?: string | null;
+  calculation_components?: any;
+  source_evidence?: any;
   market_value: number | null;
   base_stamp_duty: number | null;
   metro_cess_rate: number | null;
@@ -177,13 +204,24 @@ export interface StampDutyAssessment {
 
 export interface StampDutyAssessmentUpdate {
   property_type?: string;
+  property_type_uncertain?: boolean;
+  cess_uncertain?: boolean;
+  location_band?: string;
   property_description?: string;
   property_location?: string;
   survey_number?: string;
   area?: string;
+  donor_role?: string;
+  donee_role?: string;
+  donee_relation_to_donor?: string;
   relationship?: string;
-  relationship_eligibility?: "eligible" | "not_eligible" | "unknown" | "ambiguous";
+  relationship_eligibility?: "eligible" | "not_eligible" | "unknown" | "ambiguous" | string;
   jurisdiction?: string;
+  selected_rule?: "article_34_200" | "article_34_3_percent" | "article_25" | "review_required";
+  duty_rate?: string;
+  cess_rule?: string;
+  rule_version?: string;
+  effective_date?: string;
   market_value?: number;
   stamp_duty_paid?: number;
   metro_cess_paid?: number;

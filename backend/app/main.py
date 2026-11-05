@@ -55,10 +55,13 @@ from .ocr import detect_table_lines, get_ocr_status
 from .pdf_utils import LocalImageBundle, LocalPdf
 from .pdf_report import IngestionNotCompleteError, SourceChangedError, build_ingestion_report
 from .processing import (
+    RelationshipEligibility,
     evaluate_article_34_relationship,
     parse_indian_currency_amount,
     process_ingestion,
     refresh_ingestion_extraction,
+    resolve_authoritative_location_band,
+    select_stamp_duty_rule,
     sync_case_entities,
 )
 
@@ -129,7 +132,13 @@ class StampDutyAssessmentResponse(BaseModel):
     document_id: str | int
     donor_name: str | None = None
     donee_name: str | None = None
+    donor_role: str | None = None
+    donee_role: str | None = None
+    donee_relation_to_donor: str | None = None
     property_type: str = "unknown"
+    property_type_uncertain: bool = False
+    cess_uncertain: bool = False
+    location_band: str | None = None
     property_description: str | None = None
     property_location: str | None = None
     survey_number: str | None = None
@@ -138,6 +147,13 @@ class StampDutyAssessmentResponse(BaseModel):
     relationship_normalized: str | None = None
     relationship_eligibility: str = "unknown"
     jurisdiction: str = "unknown"
+    selected_rule: str | None = "review_required"
+    duty_rate: str | None = None
+    cess_rule: str | None = None
+    rule_version: str | None = "MH-ART34-2024.1"
+    effective_date: str | None = "2017-05-16"
+    calculation_components: Any = None
+    source_evidence: Any = None
     market_value: int | None = None
     base_stamp_duty: int | None = None
     metro_cess_rate: float | None = None
@@ -158,13 +174,24 @@ class StampDutyAssessmentResponse(BaseModel):
 
 class StampDutyAssessmentUpdateRequest(BaseModel):
     property_type: str | None = None
+    property_type_uncertain: bool | None = None
+    cess_uncertain: bool | None = None
+    location_band: str | None = None
     property_description: str | None = None
     property_location: str | None = None
     survey_number: str | None = None
     area: str | None = None
+    donor_role: str | None = None
+    donee_role: str | None = None
+    donee_relation_to_donor: str | None = None
     relationship: str | None = None
-    relationship_eligibility: Literal["eligible", "not_eligible", "unknown", "ambiguous"] | None = None
+    relationship_eligibility: Literal["eligible", "not_eligible", "unknown", "ambiguous", "article_34_200", "article_34_3_percent", "article_25"] | None = None
     jurisdiction: str | None = None
+    selected_rule: Literal["article_34_200", "article_34_3_percent", "article_25", "review_required"] | None = None
+    duty_rate: str | None = None
+    cess_rule: str | None = None
+    rule_version: str | None = None
+    effective_date: str | None = None
     market_value: int | None = None
     stamp_duty_paid: int | None = None
     metro_cess_paid: int | None = None
@@ -773,12 +800,32 @@ def _serialize_stamp_duty_assessment(assessment: StampDutyAssessment | None) -> 
     elif isinstance(evidence_val, str) and evidence_val:
         evidence_val = {"summary": evidence_val}
 
+    calc_components: Any = assessment.calculation_components
+    if isinstance(calc_components, str) and calc_components.strip().startswith("{"):
+        try:
+            calc_components = json.loads(calc_components)
+        except Exception:
+            pass
+
+    source_ev: Any = assessment.source_evidence
+    if isinstance(source_ev, str) and source_ev.strip().startswith("{"):
+        try:
+            source_ev = json.loads(source_ev)
+        except Exception:
+            pass
+
     return {
         "id": assessment.id,
         "document_id": assessment.document_id,
         "donor_name": assessment.donor_name,
         "donee_name": assessment.donee_name,
+        "donor_role": assessment.donor_role,
+        "donee_role": assessment.donee_role,
+        "donee_relation_to_donor": assessment.donee_relation_to_donor,
         "property_type": assessment.property_type or "unknown",
+        "property_type_uncertain": bool(assessment.property_type_uncertain),
+        "cess_uncertain": bool(assessment.cess_uncertain),
+        "location_band": assessment.location_band,
         "property_description": assessment.property_description,
         "property_location": assessment.property_location,
         "survey_number": assessment.survey_number,
@@ -787,6 +834,13 @@ def _serialize_stamp_duty_assessment(assessment: StampDutyAssessment | None) -> 
         "relationship_normalized": assessment.relationship_normalized,
         "relationship_eligibility": assessment.relationship_eligibility or "unknown",
         "jurisdiction": assessment.jurisdiction or "unknown",
+        "selected_rule": assessment.selected_rule or "review_required",
+        "duty_rate": assessment.duty_rate,
+        "cess_rule": assessment.cess_rule,
+        "rule_version": assessment.rule_version or assessment.legal_rule_version or "MH-ART34-2024.1",
+        "effective_date": assessment.effective_date or "2017-05-16",
+        "calculation_components": calc_components,
+        "source_evidence": source_ev,
         "market_value": assessment.market_value,
         "base_stamp_duty": assessment.base_duty,
         "metro_cess_rate": assessment.metro_cess_rate,
@@ -815,84 +869,191 @@ def recalculate_and_sync_stamp_duty_assessment(
 ) -> None:
     rel_elig = assessment.relationship_eligibility or "unknown"
     prop_type = assessment.property_type or "unknown"
+    prop_uncertain = bool(assessment.property_type_uncertain)
     mv = assessment.market_value
+    donee_rel = assessment.donee_relation_to_donor or assessment.relationship_normalized
 
-    jur_text = (assessment.jurisdiction or "").casefold()
-    is_non_metro = any(ind in jur_text for ind in NON_METRO_INDICATORS)
-    is_metro = (
-        prop_type != "agricultural_land"
-        and not is_non_metro
-        and ("metro" in jur_text or any(j in jur_text for j in METRO_CESS_JURISDICTIONS))
-    )
+    # Determine location band and cess applicability strictly without loose assumptions
+    location_band = assessment.location_band
+    jurisdiction = assessment.jurisdiction
+    cess_uncertain = assessment.cess_uncertain
 
-    assessment.metro_cess_rate = float(STAMP_DUTY_METRO_CESS_RATE) if is_metro else 0.0
+    if not location_band or cess_uncertain or not jurisdiction or jurisdiction == "unknown":
+        resolved_band, resolved_jur, resolved_uncertain, _ = resolve_authoritative_location_band(
+            prop_loc=assessment.property_location,
+            schedule_text=assessment.property_description,
+            reg_summary=None,
+        )
+        if not location_band:
+            location_band = resolved_band
+        if not jurisdiction or jurisdiction == "unknown":
+            jurisdiction = resolved_jur
+        cess_uncertain = resolved_uncertain
+
+    assessment.location_band = location_band
+    assessment.jurisdiction = jurisdiction
+    assessment.cess_uncertain = cess_uncertain
+
+    if assessment.selected_rule in ("article_34_200", "article_34_3_percent", "article_25", "review_required"):
+        selected_rule = assessment.selected_rule
+    else:
+        selected_rule = select_stamp_duty_rule(
+            donee_relation_to_donor=donee_rel,
+            property_type=prop_type,
+            property_type_uncertain=prop_uncertain,
+            is_relationship_ambiguous=(rel_elig == "ambiguous"),
+        )
+        assessment.selected_rule = selected_rule
 
     if assessment.total_stamp_duty_paid is None and (assessment.stamp_duty_paid is not None or assessment.metro_cess_paid is not None):
         assessment.total_stamp_duty_paid = (assessment.stamp_duty_paid or 0) + (assessment.metro_cess_paid or 0)
     total_paid = assessment.total_stamp_duty_paid
 
+    base_duty: int | None = None
+    duty_rate: str | None = None
+    cess_rule: str | None = None
+    metro_cess_rate: float | None = None
+    metro_cess_amount: int | None = None
+    expected_total: int | None = None
+
+    # Evaluate cess strictly on verified location; no automatic exemption for agricultural property
+    if cess_uncertain:
+        metro_cess_rate = None
+        metro_cess_amount = None
+        cess_rule = "jurisdiction_uncertain"
+    elif jurisdiction == "metro":
+        metro_cess_rate = float(STAMP_DUTY_METRO_CESS_RATE)
+        metro_cess_amount = (
+            int((Decimal(mv) * Decimal(str(metro_cess_rate))).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            if mv is not None
+            else None
+        )
+        cess_rule = "metro_cess_1_percent"
+    else:  # non_metro
+        metro_cess_rate = 0.0
+        metro_cess_amount = 0
+        cess_rule = "non_metro_exempt"
+
+    if selected_rule == "article_34_200":
+        duty_rate = "200_fixed"
+        base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+        if cess_uncertain:
+            expected_total = None
+        else:
+            expected_total = base_duty + (metro_cess_amount or 0)
+
+    elif selected_rule == "article_34_3_percent":
+        duty_rate = "3%"
+        if mv is not None:
+            base_duty = int((Decimal(mv) * Decimal("0.03")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            if cess_uncertain:
+                expected_total = None
+            else:
+                expected_total = base_duty + (metro_cess_amount or 0)
+        else:
+            base_duty = None
+            expected_total = None
+
+    elif selected_rule == "article_25":
+        if location_band == "municipal_corporation_mmr_influence":
+            duty_rate = "5%"
+            if mv is not None:
+                base_duty = int((Decimal(mv) * Decimal("0.05")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            else:
+                base_duty = None
+        elif location_band == "gram_panchayat_other":
+            duty_rate = "4%"
+            if mv is not None:
+                base_duty = int((Decimal(mv) * Decimal("0.04")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            else:
+                base_duty = None
+        else:
+            duty_rate = "review_required"
+            base_duty = None
+
+        if base_duty is not None and not cess_uncertain:
+            expected_total = base_duty + (metro_cess_amount or 0)
+        else:
+            expected_total = None
+
+    else:  # review_required
+        duty_rate = "review_required"
+        if rel_elig in ("article_34_200", "eligible"):
+            base_duty = int(STAMP_DUTY_BASE_AMOUNT)
+        if not cess_uncertain and mv is not None and metro_cess_amount is not None:
+            if base_duty:
+                expected_total = base_duty + metro_cess_amount
+
+    assessment.selected_rule = selected_rule
+    assessment.duty_rate = duty_rate
+    assessment.cess_rule = cess_rule
+    assessment.base_duty = base_duty
+    assessment.metro_cess_rate = metro_cess_rate
+    assessment.metro_cess_amount = metro_cess_amount
+    assessment.expected_total = expected_total
+
     if explicit_status:
         assessment.status = explicit_status
-    elif rel_elig == "not_eligible" or prop_type == "other_property":
-        assessment.status = "not_applicable"
-        assessment.base_duty = None
-        assessment.metro_cess_amount = None
-        assessment.expected_total = None
-        assessment.difference = None
-    elif rel_elig == "ambiguous" or prop_type == "unknown":
-        assessment.status = "requires_review"
-        assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
-        if mv is not None:
-            metro_cess = (Decimal(mv) * Decimal(str(assessment.metro_cess_rate))).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
-            )
-            assessment.metro_cess_amount = int(metro_cess)
-            assessment.expected_total = assessment.base_duty + assessment.metro_cess_amount
-            if total_paid is not None:
-                assessment.difference = total_paid - assessment.expected_total
-    elif rel_elig == "unknown":
-        assessment.status = "not_available"
-        assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
-        assessment.metro_cess_amount = None
-        assessment.expected_total = None
-        assessment.difference = None
-    elif mv is None:
-        if is_metro:
+        if total_paid is not None and expected_total is not None:
+            assessment.difference = total_paid - expected_total
+        else:
+            assessment.difference = None
+    elif selected_rule == "review_required":
+        if rel_elig == "unknown":
+            assessment.status = "not_available"
+        else:
             assessment.status = "requires_review"
-            assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
-            assessment.metro_cess_amount = None
-            assessment.expected_total = None
+        assessment.difference = None
+    elif selected_rule == "article_25":
+        art25_reasons = []
+        if not location_band:
+            art25_reasons.append("uncertain location band")
+        if cess_uncertain:
+            art25_reasons.append("cess uncertain")
+        if mv is None:
+            art25_reasons.append("missing market value")
+        if prop_uncertain or prop_type in ("unknown", "ambiguous"):
+            art25_reasons.append("uncertain property type")
+        if rel_elig in ("unknown", "ambiguous"):
+            art25_reasons.append("ambiguous relationship")
+        if art25_reasons:
+            assessment.status = "requires_review"
             assessment.difference = None
         else:
-            assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
-            assessment.metro_cess_amount = 0
-            assessment.expected_total = assessment.base_duty
-            if total_paid is not None:
-                diff = total_paid - assessment.expected_total
-                assessment.difference = diff
-                assessment.status = "compliant" if diff >= 0 else "short_paid"
+            assessment.status = "not_applicable"
+            if total_paid is not None and expected_total is not None:
+                assessment.difference = total_paid - expected_total
             else:
-                assessment.status = "requires_review"
                 assessment.difference = None
+    elif cess_uncertain:
+        assessment.status = "requires_review"
+        assessment.difference = None
+    elif mv is None or expected_total is None:
+        assessment.status = "not_available"
+        assessment.difference = None
+    elif total_paid is None:
+        assessment.status = "not_available"
+        assessment.difference = None
     else:
-        assessment.base_duty = int(STAMP_DUTY_BASE_AMOUNT)
-        if is_metro:
-            metro_cess = (Decimal(mv) * Decimal("0.01")).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
-            )
-            assessment.metro_cess_amount = int(metro_cess)
-            assessment.expected_total = assessment.base_duty + assessment.metro_cess_amount
-        else:
-            assessment.metro_cess_amount = 0
-            assessment.expected_total = assessment.base_duty
+        diff = total_paid - expected_total
+        assessment.difference = diff
+        assessment.status = "compliant" if diff >= 0 else "short_paid"
 
-        if total_paid is not None:
-            diff = total_paid - assessment.expected_total
-            assessment.difference = diff
-            assessment.status = "compliant" if diff >= 0 else "short_paid"
-        else:
-            assessment.status = "requires_review"
-            assessment.difference = None
+    calc_components = {
+        "selected_rule": assessment.selected_rule,
+        "duty_rate": assessment.duty_rate,
+        "base_duty_amount": assessment.base_duty,
+        "market_value": assessment.market_value,
+        "location_band": assessment.location_band,
+        "cess_uncertain": assessment.cess_uncertain,
+        "cess_rule": assessment.cess_rule,
+        "metro_cess_rate": assessment.metro_cess_rate,
+        "metro_cess_amount": assessment.metro_cess_amount,
+        "expected_total": assessment.expected_total,
+        "total_stamp_duty_paid": total_paid,
+        "difference": assessment.difference,
+    }
+    assessment.calculation_components = json.dumps(calc_components)
 
     def sync_field(name: str, val: str | None):
         f = db.scalar(
@@ -1028,8 +1189,28 @@ def document_detail(document_id: str, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(404, "Document not found.")
     pages = db.scalars(select(Page).where(Page.ingestion_id == row.ingestion_id, Page.page_number >= row.start_page, Page.page_number <= row.end_page).order_by(Page.page_number)).all()
+    findings = db.scalars(
+        select(ValidationFinding)
+        .where(ValidationFinding.document_id == document_id)
+        .order_by(ValidationFinding.severity.desc())
+    ).all()
     return {
         **_doc_dict(row),
+        "findings": [
+            {
+                "id": f.id,
+                "case_id": f.case_id,
+                "document_id": f.document_id,
+                "rule_id": f.rule_id,
+                "severity": f.severity,
+                "kind": f.kind,
+                "explanation": f.explanation,
+                "evidence": f.evidence,
+                "source_pages": f.source_pages,
+                "review_status": f.review_status,
+            }
+            for f in findings
+        ],
         "pages": [
             {
                 "id": page.id,
@@ -1217,8 +1398,16 @@ def update_stamp_duty_assessment(
         "metro_cess_paid",
         "total_stamp_duty_paid",
         "property_type",
+        "property_type_uncertain",
+        "donor_role",
+        "donee_role",
+        "donee_relation_to_donor",
+        "relationship",
         "relationship_eligibility",
         "jurisdiction",
+        "location_band",
+        "cess_uncertain",
+        "selected_rule",
     }
     update_data = payload.model_dump(exclude_unset=True)
     needs_recalc = any(k in update_data for k in recalc_keys)
@@ -1231,9 +1420,15 @@ def update_stamp_duty_assessment(
 
     if "relationship" in update_data and "relationship_eligibility" not in update_data:
         if update_data["relationship"]:
-            _, norm, elig, _, _, _ = evaluate_article_34_relationship(update_data["relationship"])
-            assessment.relationship_normalized = norm
-            assessment.relationship_eligibility = elig
+            rel_res = evaluate_article_34_relationship(update_data["relationship"])
+            assessment.relationship_normalized = rel_res[1]
+            assessment.relationship_eligibility = RelationshipEligibility(rel_res[2])
+            if getattr(rel_res, "donee_relation_to_donor", None):
+                assessment.donee_relation_to_donor = rel_res.donee_relation_to_donor
+            if getattr(rel_res, "donor_role", None):
+                assessment.donor_role = rel_res.donor_role
+            if getattr(rel_res, "donee_role", None):
+                assessment.donee_role = rel_res.donee_role
             needs_recalc = True
 
     explicit_status = update_data.get("status")
