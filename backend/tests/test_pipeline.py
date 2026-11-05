@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NumberObject
 
-from backend.app.models import LogicalDocument, Page
+from backend.app.models import ExtractedField, LogicalDocument, Page
 from backend.app import ocr as ocr_module
 from backend.app.ocr import _combine_words, _easyocr_mode, _paddle_words, _words_to_text, get_ocr_status
 from backend.app.pdf_utils import LocalImageBundle, LocalPdf
@@ -18,6 +18,7 @@ from backend.app.processing import (
     _starts_new_document,
     _unresolved_annexure_references,
     assess_stamp_duty_article_34,
+    check_donor_donee_surname_risk,
     classify_text,
     evaluate_article_34_relationship,
     extract_fields,
@@ -25,6 +26,8 @@ from backend.app.processing import (
     extract_property_schedule,
     extract_stamp_duty_paid,
     parse_indian_currency_amount,
+    resolve_authoritative_location_band,
+    select_stamp_duty_rule,
 )
 
 
@@ -1216,7 +1219,7 @@ def test_article_34_scenario_10_exact_compliant_payment():
     # 10. Exact compliant payment: Expected ₹25,200, Paid ₹25,200 -> status == "compliant", difference == 0.
     doc = LogicalDocument(id="doc-s10", ingestion_id="ing-s10", start_page=1, end_page=1, category="gift_deed")
     text_by_page = [
-        (1, "GIFT DEED\nWHEREAS the donor is the son of the donee.\nSchedule: Residential premises at Pune.\nMarket Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-"),
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee.\nSchedule: Residential premises at Pune.\nMarket Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-"),
     ]
     assess = assess_stamp_duty_article_34(doc, text_by_page)
     assert assess.expected_total == 25200
@@ -1393,5 +1396,877 @@ def test_article_34_scenario_21_multiple_properties():
     assert assess.status == "requires_review"
     finding_rules = [f.rule_id for f in assess.findings_list]
     assert "ambiguous_property_type" in finding_rules or "stamp_duty_calculation_requires_review" in finding_rules
+
+
+def test_directional_relationship_son_gifts_to_mother():
+    # Son gifts to mother: donee_relation_to_donor = "mother" -> article_34_3_percent (3% duty + 1% metro cess in Pune)
+    doc = LogicalDocument(id="doc-dir-1", ingestion_id="ing-dir-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the son of the donee, gifting out of natural love and affection to his mother.\nSchedule of Property:\nResidential flat in Pune.\nMarket Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 1,00,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "son"
+    assert assess.donee_role == "mother"
+    assert assess.donee_relation_to_donor == "mother"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.duty_rate == "3%"
+    assert assess.base_duty == 75000  # 3% of 25,00,000
+    assert assess.metro_cess_amount == 25000  # 1% of 25,00,000
+    assert assess.expected_total == 100000
+    assert assess.total_stamp_duty_paid == 100000
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_directional_relationship_mother_gifts_to_son_residential():
+    # Mother gifts to son: donee_relation_to_donor = "son" -> article_34_200 (₹200 fixed + 1% metro cess in Pune)
+    doc = LogicalDocument(id="doc-dir-2", ingestion_id="ing-dir-2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the mother of the donee, gifting to her beloved son.\nSchedule of Property:\nResidential flat in Pune.\nMarket Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "mother"
+    assert assess.donee_role == "son"
+    assert assess.donee_relation_to_donor == "son"
+    assert assess.selected_rule == "article_34_200"
+    assert assess.duty_rate == "200_fixed"
+    assert assess.base_duty == 200
+    assert assess.metro_cess_amount == 25000
+    assert assess.expected_total == 25200
+    assert assess.total_stamp_duty_paid == 25200
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_directional_relationship_mother_gifts_to_son_commercial_property():
+    # Mother gifts to son commercial property -> property is not residential/agri, falls under article_34_3_percent
+    doc = LogicalDocument(id="doc-dir-3", ingestion_id="ing-dir-3", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the mother of the donee, transferring to her son.\nSchedule of Property:\nCommercial shop and office at Pune.\nMarket Value: ₹ 20,00,000/-\nTotal Stamp Duty Paid: ₹ 80,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "mother"
+    assert assess.donee_role == "son"
+    assert assess.donee_relation_to_donor == "son"
+    assert assess.property_type == "other_property"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.duty_rate == "3%"
+    assert assess.base_duty == 60000  # 3% of 20,00,000
+    assert assess.metro_cess_amount == 20000  # 1% of 20,00,000
+    assert assess.expected_total == 80000
+    assert assess.total_stamp_duty_paid == 80000
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_schedule_scoped_property_type_ignores_recital_mentions():
+    # Page 1 recital mentions residential flat at Bandra Mumbai, but Schedule explicitly states agricultural land
+    # -> Scoped strictly to Schedule, resolving to agricultural_land (not mixed/ambiguous)
+    doc = LogicalDocument(id="doc-sched-1", ingestion_id="ing-sched-1", start_page=1, end_page=2, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor resides at his residential flat in Bandra Mumbai.\nWHEREAS the donor is the father of the donee."),
+        (2, "Schedule of Property\nAll that piece and parcel of Agricultural land bearing Gat No 45/2 at Taluka Baramati, District Pune.\nMarket Value: ₹ 10,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.property_type == "agricultural_land"
+    assert assess.property_type_uncertain is False
+    assert assess.selected_rule == "article_34_200"
+    assert assess.cess_rule == "non_metro_exempt"
+    assert assess.metro_cess_rate == 0.0
+    assert assess.base_duty == 200
+    assert assess.metro_cess_amount == 0
+    assert assess.expected_total == 200
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_schedule_multiple_distinct_properties_sets_uncertain():
+    # Schedule with multiple properties sets property_type_uncertain = True, selected_rule = "review_required"
+    doc = LogicalDocument(id="doc-sched-2", ingestion_id="ing-sched-2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee.\nSchedule of Property:\nProperty No. 1: Residential flat 101, Pune.\nProperty No. 2: Commercial office 202, Pune.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.property_type_uncertain is True
+    assert assess.selected_rule == "review_required"
+    assert assess.status == "requires_review"
+
+
+def test_three_regime_explicit_metadata_persistence():
+    # Verify metadata fields: selected_rule, duty_rate, cess_rule, rule_version, effective_date, calculation_components, source_evidence
+    doc = LogicalDocument(id="doc-meta-1", ingestion_id="ing-meta-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee.\nSchedule of Property: Residential premises at Pune.\nMarket Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-\nChallan No: CH-9988"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_34_200"
+    assert assess.duty_rate == "200_fixed"
+    assert assess.cess_rule == "metro_cess_1_percent"
+    assert assess.rule_version == "MH-ART34-2024.1"
+    assert assess.effective_date == "2017-05-16"
+    assert assess.donor_role == "father"
+    assert assess.donee_role == "son"
+    assert assess.donee_relation_to_donor == "son"
+    assert assess.property_type_uncertain is False
+
+    # Check calculation_components JSON
+    calc = json.loads(assess.calculation_components)
+    assert calc["selected_rule"] == "article_34_200"
+    assert calc["duty_rate"] == "200_fixed"
+    assert calc["base_duty_amount"] == 200
+    assert calc["market_value"] == 2500000
+    assert calc["cess_rule"] == "metro_cess_1_percent"
+    assert calc["metro_cess_rate"] == 0.01
+    assert calc["metro_cess_amount"] == 25000
+    assert calc["expected_total"] == 25200
+    assert calc["total_stamp_duty_paid"] == 25200
+    assert calc["difference"] == 0
+
+    # Check source_evidence JSON
+    ev = json.loads(assess.source_evidence)
+    assert "directional_relationship" in ev
+    assert ev["directional_relationship"]["donor_role"] == "father"
+    assert ev["directional_relationship"]["donee_role"] == "son"
+    assert ev["directional_relationship"]["donee_relation_to_donor"] == "son"
+    assert "property_schedule" in ev
+    assert ev["property_schedule"]["property_type"] == "residential_property"
+    assert ev["property_schedule"]["property_type_uncertain"] is False
+    assert "valuation" in ev
+    assert ev["valuation"]["market_value"] == 2500000
+    assert "payment" in ev
+    assert ev["payment"]["total_paid"] == 25200
+    assert ev["payment"]["challan_number"] == "CH-9988"
+
+
+def test_agricultural_property_in_municipal_corporation_pays_metro_cess():
+    # Agricultural land within Municipal Corporation boundary is NOT automatically exempt from metro cess
+    doc = LogicalDocument(id="doc-agri-metro", ingestion_id="ing-agri-metro", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee.\nSchedule of Property:\nAgricultural land within Pune Municipal Corporation limits.\nMarket Value: ₹ 50,00,000/-\nTotal Stamp Duty Paid: ₹ 50,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.property_type == "agricultural_land"
+    assert assess.location_band == "municipal_corporation_mmr_influence"
+    assert assess.jurisdiction == "metro"
+    assert assess.cess_uncertain is False
+    assert assess.cess_rule == "metro_cess_1_percent"
+    assert assess.base_duty == 200
+    assert assess.metro_cess_rate == 0.01
+    assert assess.metro_cess_amount == 50000
+    assert assess.expected_total == 50200
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_unknown_jurisdiction_cess_uncertain_no_fabricated_zero_rate():
+    # When authoritative location cannot resolve jurisdiction, cess_uncertain = True, no 0% saved with 1% math
+    doc = LogicalDocument(id="doc-jur-unknown", ingestion_id="ing-jur-unknown", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee.\nSchedule of Property:\nResidential flat situated in Maharashtra State.\nMarket Value: ₹ 20,00,000/-\nTotal Stamp Duty Paid: ₹ 20,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.cess_uncertain is True
+    assert assess.location_band is None
+    assert assess.jurisdiction == "unknown"
+    assert assess.cess_rule == "jurisdiction_uncertain"
+    assert assess.metro_cess_rate is None
+    assert assess.metro_cess_amount is None
+    assert assess.expected_total is None
+    assert assess.status == "requires_review"
+    assert "Cess applicability cannot be verified" in assess.reviewer_notes
+
+
+def test_article_34_3_percent_short_paid_finding():
+    # Mother gifts to son commercial office (other_property) in Pune (metro)
+    # Expected base: 3% of 40L = 1,20,000; metro cess: 1% of 40L = 40,000; total = 1,60,000.
+    # Paid: 1,20,000 -> short paid by 40,000.
+    doc = LogicalDocument(id="doc-art34-short", ingestion_id="ing-art34-short", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the mother of the donee, gifting to her son.\nSchedule of Property:\nCommercial office premises at Pune.\nMarket Value: ₹ 40,00,000/-\nTotal Stamp Duty Paid: ₹ 1,20,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.duty_rate == "3%"
+    assert assess.base_duty == 120000
+    assert assess.metro_cess_rate == 0.01
+    assert assess.metro_cess_amount == 40000
+    assert assess.expected_total == 160000
+    assert assess.total_stamp_duty_paid == 120000
+    assert assess.difference == -40000
+    assert assess.status == "short_paid"
+
+    # Check finding created
+    finding = next((f for f in getattr(assess, "findings_list", []) if f.rule_id == "short_paid_stamp_duty"), None)
+    assert finding is not None
+    assert "Short paid" in finding.explanation
+
+
+def test_article_25_municipal_corporation_calculation():
+    # Ineligible relationship (uncle to nephew) in Mumbai (Municipal Corporation)
+    # Location band: municipal_corporation_mmr_influence (5% base + 1% metro cess = 6%)
+    # Market value 60,00,000 -> 5% base = 3,00,000, 1% cess = 60,00, total = 3,60,000.
+    doc = LogicalDocument(id="doc-art25-mc", ingestion_id="ing-art25-mc", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential flat at Mumbai Suburban.\nMarket Value: ₹ 60,00,000/-\nTotal Stamp Duty Paid: ₹ 3,60,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.duty_rate == "5%"
+    assert assess.location_band == "municipal_corporation_mmr_influence"
+    assert assess.jurisdiction == "metro"
+    assert assess.cess_uncertain is False
+    assert assess.base_duty == 300000
+    assert assess.metro_cess_rate == 0.01
+    assert assess.metro_cess_amount == 60000
+    assert assess.expected_total == 360000
+    assert assess.total_stamp_duty_paid == 360000
+    assert assess.difference == 0
+    assert assess.status == "not_applicable"
+    assert "Article 25 standard conveyance applies at 5%" in assess.reviewer_notes
+
+
+def test_article_25_gram_panchayat_calculation():
+    # Ineligible relationship (uncle to nephew) in rural Gram Panchayat (Baramati)
+    # Location band: gram_panchayat_other (4% base + 0% cess)
+    # Market value 20,00,000 -> 4% base = 80,000, cess = 0, total = 80,000.
+    doc = LogicalDocument(id="doc-art25-gp", ingestion_id="ing-art25-gp", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential house in Gram Panchayat village, Taluka Baramati.\nMarket Value: ₹ 20,00,000/-\nTotal Stamp Duty Paid: ₹ 80,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.duty_rate == "4%"
+    assert assess.location_band == "gram_panchayat_other"
+    assert assess.jurisdiction == "non_metro"
+    assert assess.cess_uncertain is False
+    assert assess.cess_rule == "non_metro_exempt"
+    assert assess.base_duty == 80000
+    assert assess.metro_cess_rate == 0.0
+    assert assess.metro_cess_amount == 0
+    assert assess.expected_total == 80000
+    assert assess.total_stamp_duty_paid == 80000
+    assert assess.difference == 0
+    assert assess.status == "not_applicable"
+    assert "Article 25 standard conveyance applies at 4%" in assess.reviewer_notes
+
+
+def test_article_25_uncertain_location_band_flags_requires_review():
+    # Ineligible relationship (uncle to nephew), but location cannot be determined as MC or GP
+    doc = LogicalDocument(id="doc-art25-unc", ingestion_id="ing-art25-unc", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential flat situated in Maharashtra State.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 1,50,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.location_band is None
+    assert assess.cess_uncertain is True
+    assert assess.status == "requires_review"
+    assert "Authoritative property location could not be resolved to a definite location band" in assess.reviewer_notes
+
+
+def test_check_donor_donee_surname_risk_mismatch():
+    has_mismatch, explanation, meta = check_donor_donee_surname_risk(
+        donor_name="Shri Ramesh Patil",
+        donee_name="Suresh Deshmukh",
+    )
+    assert has_mismatch is True
+    assert explanation is not None
+    assert "Patil" in explanation and "Deshmukh" in explanation
+    assert meta["suppressed"] is False
+    assert meta["matches"] is False
+    assert meta["donor_surname"] == "Patil"
+    assert meta["donee_surname"] == "Deshmukh"
+
+
+def test_check_donor_donee_surname_risk_matching_surnames():
+    has_mismatch, explanation, meta = check_donor_donee_surname_risk(
+        donor_name="Shri Ramesh Patil",
+        donee_name="Suresh Patil",
+    )
+    assert has_mismatch is False
+    assert explanation is None
+    assert meta["suppressed"] is False
+    assert meta["matches"] is True
+    assert meta["donor_surname"] == "Patil"
+    assert meta["donee_surname"] == "Patil"
+
+
+def test_matching_surnames_never_infer_family_relationship():
+    # Matching surnames must NEVER be used to infer an Article 34 family relationship
+    # if recital evidence is missing or unrelated.
+    doc = LogicalDocument(id="doc-surname-infer", ingestion_id="ing-infer", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nBetween Ramesh Patil (Donor) and Suresh Patil (Donee).\nSchedule of Property:\nResidential flat in Pune.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    # Without recital relationship evidence, relationship must remain unknown/unverified
+    assert assess.relationship_eligibility in ("unknown", "not_eligible")
+    assert assess.selected_rule != "article_34_200"
+
+
+def test_check_donor_donee_surname_risk_suppressed_for_married_female():
+    # Suppressed when female donee has Sau. / Smt. or daughter/sister/wife relation
+    has_mismatch, explanation, meta = check_donor_donee_surname_risk(
+        donor_name="Ramesh Patil",
+        donee_name="Sau. Sunita Kadam",
+        relationship_context={"donee_relation_to_donor": "daughter"},
+    )
+    assert has_mismatch is False
+    assert explanation is None
+    assert meta["suppressed"] is True
+    assert meta["reason"] == "married_female_name_change"
+
+    # Also test Marathi honorific सौ.
+    has_mismatch_mr, _, meta_mr = check_donor_donee_surname_risk(
+        donor_name="रमेश पाटील",
+        donee_name="सौ. सुनिता कदम",
+    )
+    assert has_mismatch_mr is False
+    assert meta_mr["suppressed"] is True
+
+
+def test_check_donor_donee_surname_risk_suppressed_for_maiden_name_indicators():
+    # English "née" or "nee"
+    has_mismatch, explanation, meta = check_donor_donee_surname_risk(
+        donor_name="Ramesh Patil",
+        donee_name="Sunita Kadam (née Patil)",
+    )
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+    assert meta["reason"] == "maiden_or_married_name_indicator_found"
+
+    # Marathi "पूर्वीचे नाव"
+    has_mismatch_mr, _, meta_mr = check_donor_donee_surname_risk(
+        donor_name="रमेश पाटील",
+        donee_name="सुनिता कदम (पूर्वीचे नाव पाटील)",
+    )
+    assert has_mismatch_mr is False
+    assert meta_mr["suppressed"] is True
+
+
+def test_check_donor_donee_surname_risk_suppressed_for_single_word_or_initials():
+    # Single word donor
+    has_mismatch_sw, _, meta_sw = check_donor_donee_surname_risk(
+        donor_name="Ramesh",
+        donee_name="Suresh Kadam",
+    )
+    assert has_mismatch_sw is False
+    assert meta_sw["suppressed"] is True
+    assert meta_sw["reason"] == "single_word_name"
+
+    # Initials only
+    has_mismatch_init, _, meta_init = check_donor_donee_surname_risk(
+        donor_name="R. K. Patil",
+        donee_name="S. D.",
+    )
+    assert has_mismatch_init is False
+    assert meta_init["suppressed"] is True
+    assert meta_init["reason"] in ("single_word_name", "initials_only_name")
+
+
+def test_check_donor_donee_surname_risk_suppressed_for_ocr_noise_and_low_confidence():
+    # OCR noise characters in name
+    has_mismatch_noise, _, meta_noise = check_donor_donee_surname_risk(
+        donor_name="Ram@sh P@t!l",
+        donee_name="Suresh Deshmukh",
+    )
+    assert has_mismatch_noise is False
+    assert meta_noise["suppressed"] is True
+    assert meta_noise["reason"] == "ocr_damage_or_noise_in_names"
+
+    # Low OCR confidence
+    has_mismatch_low_conf, _, meta_conf = check_donor_donee_surname_risk(
+        donor_name="Ramesh Patil",
+        donee_name="Suresh Deshmukh",
+        ocr_confidence=0.55,
+    )
+    assert has_mismatch_low_conf is False
+    assert meta_conf["suppressed"] is True
+    assert meta_conf["reason"] == "low_ocr_confidence"
+
+
+def test_check_donor_donee_surname_risk_suppressed_for_missing_names():
+    # None or empty
+    has_mismatch_none, _, meta_none = check_donor_donee_surname_risk(None, "Suresh Deshmukh")
+    assert has_mismatch_none is False
+    assert meta_none["suppressed"] is True
+    assert meta_none["reason"] == "missing_or_unavailable_name"
+
+    has_mismatch_empty, _, meta_empty = check_donor_donee_surname_risk("Ramesh Patil", "")
+    assert has_mismatch_empty is False
+    assert meta_empty["suppressed"] is True
+
+
+def test_stamp_duty_pipeline_emits_donor_donee_surname_mismatch_soft_finding():
+    class DummyDb:
+        def __init__(self):
+            self.added = []
+            self.new = set()
+
+        def scalar(self, query):
+            return None
+
+        def add(self, item):
+            self.added.append(item)
+            self.new.add(item)
+
+    dummy_db = DummyDb()
+    doc = LogicalDocument(id="doc-surname-pipe", ingestion_id="ing-surname-pipe", start_page=1, end_page=1, category="gift_deed")
+    doc.fields = [
+        ExtractedField(document_id=doc.id, field_name="donor_name", extracted_value="Ramesh Patil", source_page=1),
+        ExtractedField(document_id=doc.id, field_name="donee_name", extracted_value="Suresh Deshmukh", source_page=1),
+    ]
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor Ramesh Patil is gifting property to donee Suresh Deshmukh, who is the brother of the donor.\nSchedule of Property:\nResidential flat in Pune Municipal Corporation.\nMarket Value: ₹ 50,00,000/-\nTotal Stamp Duty Paid: ₹ 2,00,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page, db=dummy_db)
+
+    # Calculation components reflect surname mismatch
+    calc_comp = json.loads(assess.calculation_components) if isinstance(assess.calculation_components, str) else assess.calculation_components
+    assert calc_comp.get("surname_mismatch") is True
+    src_ev = json.loads(assess.source_evidence) if isinstance(assess.source_evidence, str) else assess.source_evidence
+    surname_risk = src_ev.get("surname_risk", {})
+    assert surname_risk.get("matches") is False
+    assert surname_risk.get("donor_surname") == "Patil"
+    assert surname_risk.get("donee_surname") == "Deshmukh"
+
+    # Soft finding emitted in DB
+    surname_finding = next((f for f in dummy_db.added if getattr(f, "rule_id", None) == "donor_donee_surname_mismatch"), None)
+    assert surname_finding is not None
+    assert surname_finding.severity == "low"
+    assert surname_finding.kind == "identity_verification"
+    assert "Surname mismatch detected" in surname_finding.explanation
+
+
+# =====================================================================
+# MAHARASHTRA STAMP ACT RULE MATRIX COMPREHENSIVE TEST SUITE
+# =====================================================================
+
+# 1. Sibling gifts: Brother gifting residential flat to Sister -> article_34_3_percent (3%)
+# Flags short-paid if only ₹200/₹500 was paid.
+
+def test_rule_matrix_sibling_brother_to_sister_residential_short_paid_200():
+    doc = LogicalDocument(id="doc-sib-1", ingestion_id="ing-sib-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the brother of the donee, gifting to his sister out of natural love and affection.\nSchedule of Property:\nResidential flat No. 401 at Pune Municipal Corporation.\nMarket Value: ₹ 40,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "brother"
+    assert assess.donee_role == "sister"
+    assert assess.donee_relation_to_donor == "sister"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.duty_rate == "3%"
+    assert assess.location_band == "municipal_corporation_mmr_influence"
+    assert assess.jurisdiction == "metro"
+    assert assess.base_duty == 120000  # 3% of 40,00,000
+    assert assess.metro_cess_amount == 40000  # 1% of 40,00,000
+    assert assess.expected_total == 160000
+    assert assess.total_stamp_duty_paid == 200
+    assert assess.difference == -159800
+    assert assess.status == "short_paid"
+    finding_rules = [f.rule_id for f in getattr(assess, "findings_list", [])]
+    assert "short_paid_stamp_duty" in finding_rules or "stamp_duty_short_paid" in finding_rules
+
+
+def test_rule_matrix_sibling_sister_to_brother_residential_short_paid_500():
+    doc = LogicalDocument(id="doc-sib-2", ingestion_id="ing-sib-2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the sister of the donee, gifting to her brother.\nSchedule of Property:\nResidential apartment in Mumbai Suburban.\nMarket Value: ₹ 60,00,000/-\nTotal Stamp Duty Paid: ₹ 500/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "sister"
+    assert assess.donee_role == "brother"
+    assert assess.donee_relation_to_donor == "brother"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.duty_rate == "3%"
+    assert assess.base_duty == 180000  # 3% of 60,00,000
+    assert assess.metro_cess_amount == 60000  # 1% of 60,00,000
+    assert assess.expected_total == 240000
+    assert assess.total_stamp_duty_paid == 500
+    assert assess.difference == -239500
+    assert assess.status == "short_paid"
+
+
+def test_rule_matrix_sibling_unit_selector():
+    # Sibling relationships (sister, brother) must always select article_34_3_percent, never article_34_200
+    assert select_stamp_duty_rule(donee_relation_to_donor="sister", property_type="residential_property") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="brother", property_type="agricultural_land") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="sister", property_type="other_property") == "article_34_3_percent"
+
+
+# 2. Child-to-parent gifts: Son gifting residential house or agricultural land to Mother
+# Selects article_34_3_percent (3%), NOT article_34_200.
+
+def test_rule_matrix_child_to_parent_son_to_mother_residential_house():
+    doc = LogicalDocument(id="doc-c2p-1", ingestion_id="ing-c2p-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the son of the donee, gifting to his beloved mother.\nSchedule of Property:\nResidential house situated at Pune Municipal Corporation.\nMarket Value: ₹ 50,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "son"
+    assert assess.donee_role == "mother"
+    assert assess.donee_relation_to_donor == "mother"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.selected_rule != "article_34_200"
+    assert assess.duty_rate == "3%"
+    assert assess.base_duty == 150000  # 3% of 50,00,000
+    assert assess.metro_cess_amount == 50000  # 1% of 50,00,000
+    assert assess.expected_total == 200000
+    assert assess.total_stamp_duty_paid == 200
+    assert assess.difference == -199800
+    assert assess.status == "short_paid"
+
+
+def test_rule_matrix_child_to_parent_son_to_mother_agricultural_land():
+    # Even for agricultural land, child-to-parent gifts are under 3% family regime, NOT the ₹200 rule
+    doc = LogicalDocument(id="doc-c2p-2", ingestion_id="ing-c2p-2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the son of the donee, gifting to his mother.\nSchedule of Property:\nAgricultural land Gat No. 88, Gram Panchayat village, Taluka Baramati.\nMarket Value: ₹ 20,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.property_type == "agricultural_land"
+    assert assess.donor_role == "son"
+    assert assess.donee_role == "mother"
+    assert assess.donee_relation_to_donor == "mother"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.selected_rule != "article_34_200"
+    assert assess.duty_rate == "3%"
+    assert assess.location_band == "gram_panchayat_other"
+    assert assess.base_duty == 60000  # 3% of 20,00,000
+    assert assess.metro_cess_amount == 0  # non-metro exempt
+    assert assess.expected_total == 60000
+    assert assess.total_stamp_duty_paid == 200
+    assert assess.difference == -59800
+    assert assess.status == "short_paid"
+
+
+def test_rule_matrix_child_to_parent_daughter_to_father_residential():
+    doc = LogicalDocument(id="doc-c2p-3", ingestion_id="ing-c2p-3", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the daughter of the donee, gifting to her father.\nSchedule of Property:\nResidential flat in Pune Municipal Corporation.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "daughter"
+    assert assess.donee_role == "father"
+    assert assess.donee_relation_to_donor == "father"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.selected_rule != "article_34_200"
+    assert assess.status == "short_paid"
+
+
+def test_rule_matrix_child_to_parent_unit_selector():
+    # Child-to-parent (mother, father) must select article_34_3_percent, never article_34_200
+    assert select_stamp_duty_rule(donee_relation_to_donor="mother", property_type="residential_property") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="mother", property_type="agricultural_land") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="father", property_type="residential_property") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="father", property_type="agricultural_land") == "article_34_3_percent"
+
+
+# 3. Parent-to-child gifts: Mother gifting residential flat or agricultural land to Son
+# Selects article_34_200 (₹200 base duty).
+
+def test_rule_matrix_parent_to_child_mother_to_son_residential_flat():
+    doc = LogicalDocument(id="doc-p2c-1", ingestion_id="ing-p2c-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the mother of the donee, gifting to her son.\nSchedule of Property:\nResidential flat in Pune Municipal Corporation.\nMarket Value: ₹ 40,00,000/-\nTotal Stamp Duty Paid: ₹ 40,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "mother"
+    assert assess.donee_role == "son"
+    assert assess.donee_relation_to_donor == "son"
+    assert assess.selected_rule == "article_34_200"
+    assert assess.duty_rate == "200_fixed"
+    assert assess.base_duty == 200
+    assert assess.metro_cess_amount == 40000  # 1% of 40,00,000
+    assert assess.expected_total == 40200
+    assert assess.total_stamp_duty_paid == 40200
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_rule_matrix_parent_to_child_mother_to_son_agricultural_land():
+    doc = LogicalDocument(id="doc-p2c-2", ingestion_id="ing-p2c-2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the mother of the donee, gifting to her son.\nSchedule of Property:\nAgricultural land Gat 55 at Gram Panchayat village, Taluka Baramati.\nMarket Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.property_type == "agricultural_land"
+    assert assess.donor_role == "mother"
+    assert assess.donee_role == "son"
+    assert assess.donee_relation_to_donor == "son"
+    assert assess.selected_rule == "article_34_200"
+    assert assess.duty_rate == "200_fixed"
+    assert assess.base_duty == 200
+    assert assess.metro_cess_amount == 0
+    assert assess.expected_total == 200
+    assert assess.total_stamp_duty_paid == 200
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_rule_matrix_parent_to_child_father_to_daughter_residential():
+    doc = LogicalDocument(id="doc-p2c-3", ingestion_id="ing-p2c-3", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee, transferring to his daughter.\nSchedule of Property:\nResidential flat at Thane Municipal Corporation.\nMarket Value: ₹ 50,00,000/-\nTotal Stamp Duty Paid: ₹ 50,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "father"
+    assert assess.donee_role == "daughter"
+    assert assess.donee_relation_to_donor == "daughter"
+    assert assess.selected_rule == "article_34_200"
+    assert assess.base_duty == 200
+    assert assess.expected_total == 50200
+    assert assess.status == "compliant"
+
+
+def test_rule_matrix_parent_to_child_unit_selector():
+    # Statutory Article 34 ₹200 relations with residential or agricultural property
+    assert select_stamp_duty_rule(donee_relation_to_donor="son", property_type="residential_property") == "article_34_200"
+    assert select_stamp_duty_rule(donee_relation_to_donor="son", property_type="agricultural_land") == "article_34_200"
+    assert select_stamp_duty_rule(donee_relation_to_donor="daughter", property_type="residential_property") == "article_34_200"
+    assert select_stamp_duty_rule(donee_relation_to_donor="daughter", property_type="agricultural_land") == "article_34_200"
+    assert select_stamp_duty_rule(donee_relation_to_donor="wife", property_type="residential_property") == "article_34_200"
+    assert select_stamp_duty_rule(donee_relation_to_donor="husband", property_type="agricultural_land") == "article_34_200"
+    assert select_stamp_duty_rule(donee_relation_to_donor="grandson", property_type="residential_property") == "article_34_200"
+    assert select_stamp_duty_rule(donee_relation_to_donor="granddaughter", property_type="agricultural_land") == "article_34_200"
+
+
+# 4. Eligible-family commercial gifts: Father gifting commercial shop/office to Son
+# Selects article_34_3_percent (3% * market_value + applicable cess), short-paid if ₹200 paid.
+
+def test_rule_matrix_eligible_family_commercial_shop_father_to_son_short_paid():
+    doc = LogicalDocument(id="doc-com-1", ingestion_id="ing-com-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee, gifting to his son.\nSchedule of Property:\nCommercial shop premises No. 8, Ground Floor, Pune Municipal Corporation.\nMarket Value: ₹ 60,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "father"
+    assert assess.donee_role == "son"
+    assert assess.donee_relation_to_donor == "son"
+    assert assess.property_type == "other_property"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.selected_rule != "article_34_200"
+    assert assess.duty_rate == "3%"
+    assert assess.base_duty == 180000  # 3% of 60,00,000
+    assert assess.metro_cess_amount == 60000  # 1% of 60,00,000
+    assert assess.expected_total == 240000
+    assert assess.total_stamp_duty_paid == 200
+    assert assess.difference == -239800
+    assert assess.status == "short_paid"
+    finding_rules = [f.rule_id for f in getattr(assess, "findings_list", [])]
+    assert "short_paid_stamp_duty" in finding_rules or "stamp_duty_short_paid" in finding_rules
+
+
+def test_rule_matrix_eligible_family_commercial_unit_selector():
+    # Eligible family members gifting non-residential/non-agri (commercial/other_property) -> article_34_3_percent
+    assert select_stamp_duty_rule(donee_relation_to_donor="son", property_type="other_property") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="daughter", property_type="commercial") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="wife", property_type="other_property") == "article_34_3_percent"
+    assert select_stamp_duty_rule(donee_relation_to_donor="husband", property_type="commercial") == "article_34_3_percent"
+
+
+# 5. Unrelated metro vs. non-metro gifts: Article 25 (5% Municipal Corp vs 4% Gram Panchayat)
+# review_required when location band cannot be authoritatively determined.
+
+def test_rule_matrix_unrelated_municipal_corporation_5_percent():
+    doc = LogicalDocument(id="doc-art25-metro", ingestion_id="ing-art25-metro", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential flat situated within Municipal Corporation of Greater Mumbai (MCGM).\nMarket Value: ₹ 80,00,000/-\nTotal Stamp Duty Paid: ₹ 4,80,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.duty_rate == "5%"
+    assert assess.location_band == "municipal_corporation_mmr_influence"
+    assert assess.jurisdiction == "metro"
+    assert assess.cess_uncertain is False
+    assert assess.base_duty == 400000  # 5% of 80,00,000
+    assert assess.metro_cess_rate == 0.01
+    assert assess.metro_cess_amount == 80000  # 1% of 80,00,000
+    assert assess.expected_total == 480000
+    assert assess.total_stamp_duty_paid == 480000
+    assert assess.difference == 0
+    assert assess.status == "not_applicable"
+    assert "Article 25 standard conveyance applies at 5%" in assess.reviewer_notes
+
+
+def test_rule_matrix_unrelated_gram_panchayat_4_percent():
+    doc = LogicalDocument(id="doc-art25-rural", ingestion_id="ing-art25-rural", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential house situated in Gram Panchayat village, Taluka Shirur.\nMarket Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 1,00,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.duty_rate == "4%"
+    assert assess.location_band == "gram_panchayat_other"
+    assert assess.jurisdiction == "non_metro"
+    assert assess.cess_uncertain is False
+    assert assess.base_duty == 100000  # 4% of 25,00,000
+    assert assess.metro_cess_rate == 0.0
+    assert assess.metro_cess_amount == 0
+    assert assess.expected_total == 100000
+    assert assess.total_stamp_duty_paid == 100000
+    assert assess.difference == 0
+    assert assess.status == "not_applicable"
+    assert "Article 25 standard conveyance applies at 4%" in assess.reviewer_notes
+
+
+def test_rule_matrix_unrelated_uncertain_location_band_review_required():
+    doc = LogicalDocument(id="doc-art25-unc2", ingestion_id="ing-art25-unc2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential flat situated in Maharashtra State.\nMarket Value: ₹ 40,00,000/-\nTotal Stamp Duty Paid: ₹ 2,00,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.location_band is None
+    assert assess.cess_uncertain is True
+    assert assess.duty_rate == "review_required"
+    assert assess.status == "requires_review"
+    assert "Authoritative property location could not be resolved to a definite location band" in assess.reviewer_notes
+
+
+# 6. Surname mismatch matrix
+# Reliable different surnames -> soft finding donor_donee_surname_mismatch.
+# Matching surnames with no stated relationship -> does NOT infer family relationship.
+# Married-name change, single-word name, initials, and OCR damage -> exempts/suppresses.
+
+def test_rule_matrix_surname_mismatch_reliable_different_emits_soft_finding():
+    class DummyDb:
+        def __init__(self):
+            self.added = []
+            self.new = set()
+
+        def scalar(self, query):
+            return None
+
+        def add(self, item):
+            self.added.append(item)
+            self.new.add(item)
+
+    dummy_db = DummyDb()
+    doc = LogicalDocument(id="doc-sur-1", ingestion_id="ing-sur-1", start_page=1, end_page=1, category="gift_deed")
+    doc.fields = [
+        ExtractedField(document_id=doc.id, field_name="donor_name", extracted_value="Rajesh Shinde", source_page=1),
+        ExtractedField(document_id=doc.id, field_name="donee_name", extracted_value="Amit Kulkarni", source_page=1),
+    ]
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor Rajesh Shinde is gifting property to donee Amit Kulkarni, who is his brother.\nSchedule of Property:\nResidential flat in Pune Municipal Corporation.\nMarket Value: ₹ 40,00,000/-\nTotal Stamp Duty Paid: ₹ 1,60,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page, db=dummy_db)
+    calc_comp = json.loads(assess.calculation_components) if isinstance(assess.calculation_components, str) else assess.calculation_components
+    assert calc_comp.get("surname_mismatch") is True
+    surname_finding = next((f for f in dummy_db.added if getattr(f, "rule_id", None) == "donor_donee_surname_mismatch"), None)
+    assert surname_finding is not None
+    assert surname_finding.severity == "low"
+    assert surname_finding.kind == "identity_verification"
+
+
+def test_rule_matrix_surname_matching_never_infers_family_relationship():
+    doc = LogicalDocument(id="doc-sur-2", ingestion_id="ing-sur-2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nBetween Ramesh Patil (Donor) and Suresh Patil (Donee) out of mutual friendship and goodwill.\nSchedule of Property:\nResidential flat in Pune.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    # Matching surname 'Patil' must not create eligibility; relation is friendship / unrelated
+    assert assess.relationship_eligibility in ("not_eligible", "unknown")
+    assert assess.selected_rule in ("article_25", "review_required")
+    assert assess.selected_rule != "article_34_200"
+    assert assess.selected_rule != "article_34_3_percent"
+
+
+def test_rule_matrix_surname_exemptions_all_cases():
+    # A. Married female donee / honorifics (Sau., Smt., Mrs.)
+    has_mismatch, _, meta = check_donor_donee_surname_risk("Ramesh Patil", "Sau. Sunita Kadam")
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+    assert meta["reason"] == "married_female_name_change"
+
+    # B. Maiden name indicators (née, nee, पूर्वीचे नाव)
+    has_mismatch, _, meta = check_donor_donee_surname_risk("Ramesh Patil", "Sunita Kadam née Patil")
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+    assert meta["reason"] == "maiden_or_married_name_indicator_found"
+
+    has_mismatch, _, meta = check_donor_donee_surname_risk("रमेश पाटील", "सुनिता कदम (लग्नानंतरचे नाव)")
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+
+    # C. Single-word name
+    has_mismatch, _, meta = check_donor_donee_surname_risk("Ramesh", "Sunita Kulkarni")
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+    assert meta["reason"] == "single_word_name"
+
+    # D. Initials
+    has_mismatch, _, meta = check_donor_donee_surname_risk("R. K. Patil", "S. K.")
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+
+    # E. OCR damage / noise characters
+    has_mismatch, _, meta = check_donor_donee_surname_risk("R@m3sh P@t!l", "Sunita Kulkarni")
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+    assert meta["reason"] == "ocr_damage_or_noise_in_names"
+
+    # F. Low OCR confidence
+    has_mismatch, _, meta = check_donor_donee_surname_risk("Ramesh Patil", "Sunita Kulkarni", ocr_confidence=0.52)
+    assert has_mismatch is False
+    assert meta["suppressed"] is True
+    assert meta["reason"] == "low_ocr_confidence"
+
+
+# 7. Schedule edge cases:
+# Multiple properties -> triggers review.
+# Ambiguous schedule / residential in preamble vs. commercial in schedule -> uses schedule evidence only.
+# Unknown jurisdiction -> does not calculate 1% cess while storing 0% cess rate; triggers review.
+
+def test_rule_matrix_schedule_multiple_properties_triggers_review():
+    doc = LogicalDocument(id="doc-edge-1", ingestion_id="ing-edge-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee, gifting to his son.\nSchedule of Property:\nProperty No. 1: Residential flat No. 101, Pune.\nProperty No. 2: Commercial office premises No. 202, Pune.\nMarket Value: ₹ 50,00,000/-\nTotal Stamp Duty Paid: ₹ 50,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.property_type_uncertain is True
+    assert assess.selected_rule == "review_required"
+    assert assess.status == "requires_review"
+    assert "Ambiguous / mixed or multiple distinct properties in schedule" in assess.reviewer_notes
+
+
+def test_rule_matrix_schedule_scoped_ignores_preamble_residential():
+    doc = LogicalDocument(id="doc-edge-2", ingestion_id="ing-edge-2", start_page=1, end_page=2, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is currently residing at his residential flat in Bandra Mumbai.\nWHEREAS the donor is the father of the donee, gifting to his son."),
+        (2, "Schedule of Property\nCommercial office unit No. 504 at Pune Municipal Corporation.\nMarket Value: ₹ 50,00,000/-\nTotal Stamp Duty Paid: ₹ 2,00,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    # Strictly scoped to Schedule: property_type must be other_property, NOT residential from preamble
+    assert assess.property_type == "other_property"
+    assert assess.property_type_uncertain is False
+    assert assess.donee_relation_to_donor == "son"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.selected_rule != "article_34_200"
+    assert assess.base_duty == 150000  # 3% of 50,00,000
+    assert assess.metro_cess_amount == 50000  # 1% of 50,00,000
+    assert assess.expected_total == 200000
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_rule_matrix_schedule_unknown_jurisdiction_no_fake_zero_rate():
+    doc = LogicalDocument(id="doc-edge-3", ingestion_id="ing-edge-3", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the father of the donee, gifting to his son.\nSchedule of Property:\nResidential flat situated at Plot 55, Maharashtra State.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 30,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.cess_uncertain is True
+    assert assess.location_band is None
+    assert assess.jurisdiction == "unknown"
+    assert assess.cess_rule == "jurisdiction_uncertain"
+    # Crucial bugfix check: does not calculate 1% cess while saving 0% rate
+    assert assess.metro_cess_rate is None
+    assert assess.metro_cess_amount is None
+    assert assess.expected_total is None
+    assert assess.status == "requires_review"
+    assert "Cess applicability cannot be verified from authoritative location evidence; manual review required." in assess.reviewer_notes
+
 
 

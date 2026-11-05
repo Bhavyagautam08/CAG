@@ -630,7 +630,30 @@ def _draw_stamp_duty_assessment(
 
     donor = assessment.donor_name or "Not extracted"
     donee = assessment.donee_name or "Not extracted"
-    rows.append(("Parties", f"Donor: {donor}  |  Donee: {donee}", False))
+    donor_role = getattr(assessment, "donor_role", None)
+    donee_role = getattr(assessment, "donee_role", None)
+    role_info = f" ({donor_role} \u2192 {donee_role})" if donor_role and donee_role else ""
+    rows.append(("Parties", f"Donor: {donor}  |  Donee: {donee}{role_info}", False))
+
+    sel_rule = getattr(assessment, "selected_rule", None) or "review_required"
+    duty_rate = getattr(assessment, "duty_rate", None) or "N/A"
+    rule_display_map = {
+        "article_34_200": f"Article 34 (\u20B9200 Fixed Concession) | Rate: {duty_rate}",
+        "article_34_3_percent": f"Article 34 (3% Other Property / Extended Family) | Rate: {duty_rate}",
+        "article_25": f"Article 25 (Standard Conveyance) | Rate: {duty_rate}",
+        "review_required": f"Review Required | Rate: {duty_rate}",
+    }
+    rule_label = rule_display_map.get(sel_rule, f"{sel_rule.upper()} | Rate: {duty_rate}")
+    rows.append(("Selected Rule & Rate", rule_label, sel_rule == "review_required"))
+
+    loc_band = getattr(assessment, "location_band", None)
+    cess_rule = getattr(assessment, "cess_rule", None) or "N/A"
+    cess_unc = getattr(assessment, "cess_uncertain", False)
+    loc_display = (loc_band or "Unresolved").replace("_", " ").title()
+    cess_display = cess_rule.replace("_", " ").title()
+    if cess_unc:
+        cess_display += " (Uncertain)"
+    rows.append(("Location Band & Cess Rule", f"Band: {loc_display} | Cess: {cess_display}", cess_unc))
 
     rel_raw = assessment.relationship or "Not stated in recital"
     rel_norm = assessment.relationship_normalized or "N/A"
@@ -695,9 +718,31 @@ def _draw_stamp_duty_assessment(
     rows.append(("Difference (Paid vs Expected)", diff_display, diff_bad))
 
     jur_display = (assessment.jurisdiction or "Unknown").replace("_", " ").title()
-    rule_ver = assessment.legal_rule_version or "MH-ART34-2024.1"
-    rows.append(("Jurisdiction & Legal Rule", f"{jur_display} | Rule Version: {rule_ver}", False))
-    rows.append(("Legal Reference", "Maharashtra Stamp Act, Article 34 (Residential/Agricultural Gift to eligible family members: ₹200 base duty + 1% Metro Cess where applicable)", False))
+    rule_ver = getattr(assessment, "rule_version", None) or assessment.legal_rule_version or "MH-ART34-2024.1"
+    eff_date = getattr(assessment, "effective_date", None) or "2017-05-16"
+    rows.append(("Jurisdiction & Legal Rule", f"{jur_display} | Version: {rule_ver} (Eff: {eff_date})", False))
+    rows.append(("Legal Reference", "Maharashtra Stamp Act, Article 34 (Family Gift Concession) / Article 25 (Conveyance)", False))
+
+    # Surname risk notice check
+    source_ev = getattr(assessment, "source_evidence", None)
+    surname_risk = None
+    if isinstance(source_ev, str) and "surname_risk" in source_ev:
+        try:
+            ev_dict = json.loads(source_ev)
+            surname_risk = ev_dict.get("surname_risk")
+        except Exception:
+            pass
+    elif isinstance(source_ev, dict):
+        surname_risk = source_ev.get("surname_risk")
+
+    if surname_risk and surname_risk.get("matches") is False and not surname_risk.get("suppressed"):
+        d_sn = surname_risk.get("donor_surname")
+        e_sn = surname_risk.get("donee_surname")
+        rows.append((
+            "Surname Risk Notice",
+            f"Notice: Surname mismatch ('{d_sn}' vs '{e_sn}'). Verify relationship evidence against deed recitals.",
+            True,
+        ))
 
     if assessment.source_pages:
         rows.append(("Assessment Source Pages", f"Page(s) {assessment.source_pages}", False))

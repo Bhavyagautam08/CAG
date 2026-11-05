@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship as sa_relationship, relationship
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, reconstructor, relationship as sa_relationship, relationship
 
 from .db import Base
 
@@ -280,6 +280,9 @@ class StampDutyAssessment(Base):
     )
     donor_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     donee_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    donor_role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    donee_role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    donee_relation_to_donor: Mapped[str | None] = mapped_column(String(64), nullable=True)
     relationship: Mapped[str | None] = mapped_column(String(100), nullable=True)
     relationship_normalized: Mapped[str | None] = mapped_column(String(100), nullable=True)
     relationship_eligibility: Mapped[str] = mapped_column(
@@ -288,6 +291,9 @@ class StampDutyAssessment(Base):
     property_type: Mapped[str] = mapped_column(
         String(64), nullable=False, default="unknown"
     )
+    property_type_uncertain: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    cess_uncertain: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    location_band: Mapped[str | None] = mapped_column(String(64), nullable=True)
     property_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     property_location: Mapped[str | None] = mapped_column(Text, nullable=True)
     survey_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -295,6 +301,13 @@ class StampDutyAssessment(Base):
     jurisdiction: Mapped[str] = mapped_column(
         String(64), nullable=False, default="unknown"
     )
+    selected_rule: Mapped[str | None] = mapped_column(String(64), nullable=True, default="review_required")
+    duty_rate: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cess_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rule_version: Mapped[str | None] = mapped_column(String(64), nullable=True, default="MH-ART34-2024.1")
+    effective_date: Mapped[str | None] = mapped_column(String(32), nullable=True, default="2017-05-16")
+    calculation_components: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
     market_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     base_duty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     metro_cess_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -325,6 +338,12 @@ class StampDutyAssessment(Base):
     )
 
     document: Mapped["LogicalDocument"] = sa_relationship(back_populates="stamp_duty_assessment")
+
+    @reconstructor
+    def _init_on_load(self):
+        if getattr(self, "relationship_eligibility", None):
+            from .processing import RelationshipEligibility
+            self.relationship_eligibility = RelationshipEligibility(self.relationship_eligibility)
 
 
 Document = LogicalDocument
