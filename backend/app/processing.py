@@ -174,6 +174,18 @@ INVOICE_FIELD_LABELS: dict[str, tuple[tuple[str, ...], int]] = {
 
 DONOR_DONEE_RELATIONSHIP_TERMS: dict[str, tuple[str, str]] = {
     # English
+    "son to mother": ("Son to Mother", "son to mother"),
+    "son and mother": ("Son and Mother", "son to mother"),
+    "son-mother": ("Son and Mother", "son to mother"),
+    "son to father": ("Son to Father", "son to father"),
+    "son and father": ("Son and Father", "son to father"),
+    "son-father": ("Son and Father", "son to father"),
+    "daughter to mother": ("Daughter to Mother", "daughter to mother"),
+    "daughter and mother": ("Daughter and Mother", "daughter to mother"),
+    "daughter-mother": ("Daughter and Mother", "daughter to mother"),
+    "daughter to father": ("Daughter to Father", "daughter to father"),
+    "daughter and father": ("Daughter and Father", "daughter to father"),
+    "daughter-father": ("Daughter and Father", "daughter to father"),
     "parents to son": ("Parents to Son", "parents and son"),
     "parents and son": ("Parents to Son", "parents and son"),
     "parents-son": ("Parents to Son", "parents and son"),
@@ -244,6 +256,22 @@ DONOR_DONEE_RELATIONSHIP_TERMS: dict[str, tuple[str, str]] = {
     "son-in-law": ("Parent-in-law and Son-in-law", "son-in-law"),
 
     # Hindi
+    "पुत्र और माता": ("पुत्र और माता", "son to mother"),
+    "पुत्र से माता": ("पुत्र और माता", "son to mother"),
+    "पुत्र व माता": ("पुत्र और माता", "son to mother"),
+    "पुत्र-माता": ("पुत्र और माता", "son to mother"),
+    "पुत्र और पिता": ("पुत्र और पिता", "son to father"),
+    "पुत्र से पिता": ("पुत्र और पिता", "son to father"),
+    "पुत्र व पिता": ("पुत्र और पिता", "son to father"),
+    "पुत्र-पिता": ("पुत्र और पिता", "son to father"),
+    "पुत्री और माता": ("पुत्री और माता", "daughter to mother"),
+    "पुत्री से माता": ("पुत्री और माता", "daughter to mother"),
+    "पुत्री व माता": ("पुत्री और माता", "daughter to mother"),
+    "पुत्री-माता": ("पुत्री और माता", "daughter to mother"),
+    "पुत्री और पिता": ("पुत्री और पिता", "daughter to father"),
+    "पुत्री से पिता": ("पुत्री और पिता", "daughter to father"),
+    "पुत्री व पिता": ("पुत्री और पिता", "daughter to father"),
+    "पुत्री-पिता": ("पुत्री और पिता", "daughter to father"),
     "माता-पिता और पुत्र": ("माता-पिता और पुत्र", "parents and son"),
     "माता-पिता से पुत्र": ("माता-पिता और पुत्र", "parents and son"),
     "माता-पिता व पुत्र": ("माता-पिता और पुत्र", "parents and son"),
@@ -289,6 +317,22 @@ DONOR_DONEE_RELATIONSHIP_TERMS: dict[str, tuple[str, str]] = {
     "बहू": ("ससुर और बहू", "daughter-in-law"),
 
     # Marathi
+    "मुलगा आणि आई": ("मुलगा आणि आई", "son to mother"),
+    "मुलगा व आई": ("मुलगा आणि आई", "son to mother"),
+    "मुलगा ते आई": ("मुलगा आणि आई", "son to mother"),
+    "मुलगा-आई": ("मुलगा आणि आई", "son to mother"),
+    "मुलगा आणि वडील": ("मुलगा आणि वडील", "son to father"),
+    "मुलगा व वडील": ("मुलगा आणि वडील", "son to father"),
+    "मुलगा ते वडील": ("मुलगा आणि वडील", "son to father"),
+    "मुलगा-वडील": ("मुलगा आणि वडील", "son to father"),
+    "मुलगी आणि आई": ("मुलगी आणि आई", "daughter to mother"),
+    "मुलगी व आई": ("मुलगी आणि आई", "daughter to mother"),
+    "मुलगी ते आई": ("मुलगी आणि आई", "daughter to mother"),
+    "मुलगी-आई": ("मुलगी आणि आई", "daughter to mother"),
+    "मुलगी आणि वडील": ("मुलगी आणि वडील", "daughter to father"),
+    "मुलगी व वडील": ("मुलगी आणि वडील", "daughter to father"),
+    "मुलगी ते वडील": ("मुलगी आणि वडील", "daughter to father"),
+    "मुलगी-वडील": ("मुलगी आणि वडील", "daughter to father"),
     "आई-वडील आणि मुलगा": ("आई-वडील आणि मुलगा", "parents and son"),
     "आई-वडील व मुलगा": ("आई-वडील आणि मुलगा", "parents and son"),
     "आई-वडील ते मुलगा": ("आई-वडील आणि मुलगा", "parents and son"),
@@ -590,14 +634,14 @@ class PropertyScheduleResult(tuple):
 
 DONOR_DONEE_EXPLICIT_PATTERNS = [
     # Explicit header / field label pattern (e.g. "RELATIONSHIP: Parents to Son" or "RELATION: Father and Son")
-    r"\b(?:relationship|relation|related\s+as)\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*[:：is-]*\s*([a-zA-Z\s/-]+?)(?=\s*(?:[;.\n]|\bwhereas\b|\band\b|\bnow\b|$))",
+    r"\b(?:relationship|relation|related\s+as)\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*(?::|：|-|\b(?:is|are)\b)*\s*([a-zA-Z\s/-]+?)(?=\s*(?:[;.\n]|\bwhereas\b|\band\s+(?:the\b|whereas\b|now\b|in\s+witness\b)|\bnow\b|$))",
     # Hindi explicit label
     r"(?:संबंध|रिश्ता|नाता|नातेसंबंध)\s*[:：-]\s*([\u0900-\u097F\s/-]+?)(?=\s*(?:[;।\n]|$))",
     # Marathi explicit label
     r"(?:नातेसंबंध|नाते|संबंध)\s*[:：-]\s*([\u0900-\u097F\s/-]+?)(?=\s*(?:[;।\n]|$))",
 
     # Mutual / explicit relationship phrase (English)
-    r"\b(?:related\s+as|relationship\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*[:：is]*)\s*(father\s+and\s+son|father\s+and\s+daughter|mother\s+and\s+son|mother\s+and\s+daughter|brother\s+and\s+sister|brothers|sisters|husband\s+and\s+wife|father-son|father-daughter|mother-son|mother-daughter|brother-sister|husband-wife)\b",
+    r"\b(?:related\s+as|relationship\s*(?:between\s+(?:the\s+)?(?:donor\s+and\s+donee|parties))?\s*(?::|：|-|\b(?:is|are)\b)*)\s*(son\s+to\s+mother|son\s+and\s+mother|son\s+to\s+father|son\s+and\s+father|daughter\s+to\s+mother|daughter\s+and\s+mother|daughter\s+to\s+father|daughter\s+and\s+father|father\s+and\s+son|father\s+and\s+daughter|mother\s+and\s+son|mother\s+and\s+daughter|brother\s+and\s+sister|brothers|sisters|husband\s+and\s+wife|father-son|father-daughter|mother-son|mother-daughter|brother-sister|husband-wife)\b",
     r"\b(?:parties\s+(?:hereto\s+)?(?:are\s+)?(?:related\s+as\s+)?|are\s+)(brothers|sisters|husband\s+and\s+wife|father\s+and\s+son)\b",
     r"\b(?:the\s+)?donor\s+(?:is|being|referenced\s+as|is\s+also\s+referenced\s+as)\s+(?:the\s+)?(?:real\s+|full\s+|blood\s+|elder\s+|younger\s+)?(cousin\s+brother|cousin\s+sister|cousin|father|mother|son|daughter|brother|sister|husband|wife|grandfather|grandmother|grandson|granddaughter|uncle|aunt|nephew|niece)\s+of\s+(?:the\s+)?(?:donee|recipient)\b",
     r"\b(?:the\s+)?donee\s+(?:is|being|referenced\s+as|is\s+also\s+referenced\s+as)\s+(?:the\s+)?(?:real\s+|full\s+|blood\s+|elder\s+|younger\s+)?(cousin\s+brother|cousin\s+sister|cousin|father|mother|son|daughter|brother|sister|wife|husband|grandfather|grandmother|grandson|granddaughter|nephew|niece)\s+of\s+(?:the\s+)?(?:donor|transferor)\b",
@@ -605,19 +649,19 @@ DONOR_DONEE_EXPLICIT_PATTERNS = [
     r"\b(?:donor|donee)\s*[:：.-]\s*[^,\n()]+\((father|mother|son|daughter|brother|sister|husband|wife|grandson|granddaughter)\)",
 
     # Hindi
-    r"(?:दाता|देने\s*वाले?)\s+(?:और|व)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s*(?:के\s+बीच\s+)?\s*(पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
-    r"(?:दाता|देने\s*वाले?)\s+(?:और|व)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s*(?:के\s+बीच\s+)?(?:का\s+)?(?:संबंध|रिश्ता|नाता|नातेसंबंध)\s*[:：-]?\s*(पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
-    r"(?:संबंध|रिश्ता|नाता)\s*[:：-]?\s*(पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
+    r"(?:दाता|देने\s*वाले?)\s+(?:और|व)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s*(?:के\s+बीच\s+)?\s*(पुत्र\s*(?:और|व|से|-)\s*माता|पुत्र\s*(?:और|व|से|-)\s*पिता|पुत्री\s*(?:और|व|से|-)\s*माता|पुत्री\s*(?:और|व|से|-)\s*पिता|पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
+    r"(?:दाता|देने\s*वाले?)\s+(?:और|व)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s*(?:के\s+बीच\s+)?(?:का\s+)?(?:संबंध|रिश्ता|नाता|नातेसंबंध)\s*[:：-]?\s*(पुत्र\s*(?:और|व|से|-)\s*माता|पुत्र\s*(?:और|व|से|-)\s*पिता|पुत्री\s*(?:और|व|से|-)\s*माता|पुत्री\s*(?:और|व|से|-)\s*पिता|पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
+    r"(?:संबंध|रिश्ता|नाता)\s*[:：-]?\s*(पुत्र\s*(?:और|व|से|-)\s*माता|पुत्र\s*(?:और|व|से|-)\s*पिता|पुत्री\s*(?:और|व|से|-)\s*माता|पुत्री\s*(?:और|व|से|-)\s*पिता|पिता\s*(?:और|व|-)\s*पुत्र|पिता\s*(?:और|व|-)\s*पुत्री|माता\s*(?:और|व|-)\s*पुत्र|माता\s*(?:और|व|-)\s*पुत्री|भाई\s*(?:और|व|-)\s*बहन|सगे\s*भाई|पति\s*(?:और|व|-)\s*पत्नी)",
     r"(?:दाता|देने\s*वाले?)\s+(?:प्राप्तकर्ता|लेने\s*वाले?)\s+के?\s*(पिता|माता|भाई|बहन|पति|दादा|नाना|चाचा|मामा)\s*(?:हैं?|होने\s*के\s*नाते)",
     r"(?:प्राप्तकर्ता|लेने\s*वाले?)\s+(?:दाता|देने\s*वाले?)\s+क[ाेी]?\s*(पुत्र|बेटा|पुत्री|बेटी|सुपुत्र|सुपुत्री|भाई|बहन|पत्नी|पति|पोता|पोती|नाती|नातिन)\s*(?:हैं?|होने\s*के\s*नाते)",
     r"(?:स्वाभाविक|प्राकृतिक)\s+(?:प्रेम\s*(?:और|व)\s*स्नेह|प्रेम|स्नेह)\s*(?:के\s+कारण|वश)\s+(?:अपने|अपनी)\s*(पुत्र|बेटा|पुत्री|बेटी|सुपुत्र|सुपुत्री|भाई|बहन|पत्नी|पति|पोता|पोती)",
     r"(?:दाता|प्राप्तकर्ता)\s*[:：-]?\s*[^,\n()]+\((पिता|माता|पुत्र|पुत्री|बेटा|बेटी|भाई|बहन|पति|पत्नी)\)",
 
     # Marathi
-    r"देणार\s*(?:\(दाता\))?\s*(?:व|आणि)\s*घेणार\s*(?:\(स्वीकारणारा\))?\s*(?:यांचे|यांच्यातील|यांच्यात|यांच्या)\s*(?:नाते|नातेसंबंध|संबंध)?\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
+    r"देणार\s*(?:\(दाता\))?\s*(?:व|आणि)\s*घेणार\s*(?:\(स्वीकारणारा\))?\s*(?:यांचे|यांच्यातील|यांच्यात|यांच्या)\s*(?:नाते|नातेसंबंध|संबंध)?\s*[:：-]?\s*(मुलगा\s*(?:आणि|व|ते|-)\s*आई|मुलगा\s*(?:आणि|व|ते|-)\s*वडील|मुलगी\s*(?:आणि|व|ते|-)\s*आई|मुलगी\s*(?:आणि|व|ते|-)\s*वडील|वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
     r"देणार\s*(?:व|आणि)\s*घेणार\s*(?:हे\s+)?(सख्खे\s+बंधू|भाऊ|पती-पत्नी)",
-    r"(?:नातेसंबंध|नाते|संबंध)\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
-    r"देणाराचे\s+घेणाऱ्याशी\s+नाते\s*[:：-]?\s*(वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
+    r"(?:नातेसंबंध|नाते|संबंध)\s*[:：-]?\s*(मुलगा\s*(?:आणि|व|ते|-)\s*आई|मुलगा\s*(?:आणि|व|ते|-)\s*वडील|मुलगी\s*(?:आणि|व|ते|-)\s*आई|मुलगी\s*(?:आणि|व|ते|-)\s*वडील|वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
+    r"देणाराचे\s+घेणाऱ्याशी\s+नाते\s*[:：-]?\s*(मुलगा\s*(?:आणि|व|ते|-)\s*आई|मुलगा\s*(?:आणि|व|ते|-)\s*वडील|मुलगी\s*(?:आणि|व|ते|-)\s*आई|मुलगी\s*(?:आणि|व|ते|-)\s*वडील|वडील\s*(?:आणि|व|-)\s*मुलगा|वडील\s*(?:आणि|व|-)\s*मुलगी|आई\s*(?:आणि|व|-)\s*मुलगा|आई\s*(?:आणि|व|-)\s*मुलगी|भाऊ\s*(?:आणि|व|-)\s*बहीण|सख्खे\s*बंधू|पती\s*(?:आणि|व|-)\s*पत्नी)",
     r"देणार[ाी]?\s*(?:हा\s+|ही\s+)?(?:घेणाऱ्या|घेणारा)च[ाीे]?\s*(वडील|पिता|आई|माता|भाऊ|बहीण|पती|पत्नी|आजोबा|आजी|काका|मामा|चाचा|आत्या|मावशी)\s*(?:आहे|असून|असल्याने)",
     r"घेणार[ाी]?\s*(?:हा\s+|ही\s+)?(?:देणाऱ्या|देणारा)च[ाीे]?\s*(मुलगा|मुलगी|पुत्र|कन्या|चिरंजीव|सुपुत्र|सुकन्या|भाऊ|बहीण|पत्नी|पती|नातू|नात|पुतण्या|भाचा|भतीजा|भांजा)\s*(?:आहे|असून|असल्याने)",
     r"(?:नैसर्गिक|स्वाभाविक)\s+(?:प्रेम\s*(?:व|आणि)\s*जिव्हाळा|प्रेम|जिव्हाळा|लोभ|ममते)(?:पोटी|मुळे|खातर)\s+(?:आपल[ाीे]|त्यांच[ाीे])?\s*(मुलगा|मुलगी|पुत्र|कन्या|चिरंजीव|सुपुत्र|सुकन्या|भाऊ|बहीण|पत्नी|पती|नातू|नात)",
@@ -847,7 +891,7 @@ def extract_directional_relationship(
                         DONOR_DONEE_RELATIONSHIP_TERMS.get(raw_term)
                         or DONOR_DONEE_RELATIONSHIP_TERMS.get(alt_term)
                         or DONOR_DONEE_RELATIONSHIP_TERMS.get(alt_to)
-                        or next((v for k, v in DONOR_DONEE_RELATIONSHIP_TERMS.items() if k in raw_term), None)
+                        or next((v for k, v in sorted(DONOR_DONEE_RELATIONSHIP_TERMS.items(), key=lambda item: len(item[0]), reverse=True) if k in raw_term), None)
                     )
                     if norm_entry:
                         disp_val, norm_val = norm_entry
@@ -855,7 +899,15 @@ def extract_directional_relationship(
                         d_r = None
                         e_r = None
                         e_rel = None
-                        if "father and son" in norm_val:
+                        if "son to mother" in norm_val:
+                            d_r, e_r, e_rel = "son", "mother", "mother"
+                        elif "son to father" in norm_val:
+                            d_r, e_r, e_rel = "son", "father", "father"
+                        elif "daughter to mother" in norm_val:
+                            d_r, e_r, e_rel = "daughter", "mother", "mother"
+                        elif "daughter to father" in norm_val:
+                            d_r, e_r, e_rel = "daughter", "father", "father"
+                        elif "father and son" in norm_val:
                             d_r, e_r, e_rel = "father", "son", "son"
                         elif "father and daughter" in norm_val:
                             d_r, e_r, e_rel = "father", "daughter", "daughter"
@@ -997,6 +1049,64 @@ MAIDEN_OR_MARRIED_NAME_INDICATORS: tuple[str, ...] = (
 
 OCR_NOISE_IN_NAME_PATTERN = re.compile(r"[@!#$%\^*~{}\\\[\]|<>=_0-9]")
 
+FEMALE_RELATIONS_SUBJECT_TO_MARRIAGE_NAME_CHANGE: set[str] = {
+    "daughter", "मुलगी", "कन्या",
+    "sister", "बहीण", "भगिनी",
+    "wife", "पत्नी",
+    "mother", "आई", "माता",
+    "granddaughter", "नात",
+    "wife_of_deceased_son",
+}
+
+NATAL_FAMILY_RELATIONS: set[str] = {
+    "brother", "भाऊ", "बंधू",
+    "sister", "बहीण", "भगिनी",
+    "father", "वडील", "पिता",
+    "mother", "आई", "माता",
+}
+
+FEMALE_DONOR_ROLES: set[str] = {
+    "sister", "बहीण", "भगिनी",
+    "daughter", "मुलगी", "कन्या",
+    "mother", "आई", "माता",
+}
+
+RECITALS_BETWEEN_PARTY_PATTERNS: tuple[tuple[re.Pattern[str], bool], ...] = (
+    (
+        re.compile(
+            r"\b(?:between|दरम्यान)\s+([A-Za-z\u0900-\u097F\s.'-]+?)\s*(?:\(\s*(?:the\s+)?(?:donor|दाता|देणार)\s*\)|,\s*(?:the\s+)?(?:donor|दाता|देणार)\b)\s+(?:and|व|आणि)\s+([A-Za-z\u0900-\u097F\s.'-]+?)\s*(?:\(\s*(?:the\s+)?(?:donee|प्राप्तकर्ता|घेणार|घेणारा)\s*\)|,\s*(?:the\s+)?(?:donee|प्राप्तकर्ता|घेणार|घेणारा)\b)",
+            re.IGNORECASE,
+        ),
+        True,
+    ),
+    (
+        re.compile(
+            r"\b(?:between|दरम्यान)\s+([A-Za-z\u0900-\u097F\s.'-]+?)\s*(?:\(\s*(?:the\s+)?(?:donee|प्राप्तकर्ता|घेणार|घेणारा)\s*\)|,\s*(?:the\s+)?(?:donee|प्राप्तकर्ता|घेणार|घेणारा)\b)\s+(?:and|व|आणि)\s+([A-Za-z\u0900-\u097F\s.'-]+?)\s*(?:\(\s*(?:the\s+)?(?:donor|दाता|देणार)\s*\)|,\s*(?:the\s+)?(?:donor|दाता|देणार)\b)",
+            re.IGNORECASE,
+        ),
+        False,
+    ),
+)
+
+
+def _clean_extracted_name(raw_name: str | None) -> str | None:
+    if not raw_name:
+        return None
+    cleaned = raw_name.strip(" .:-;,।\t\r\n")
+    stop_words_re = re.compile(
+        r"\b(?:who\s+is|is\s+gifting|is\s+the|gifts|conveys|transfers|out\s+of|residing|resides|aged|occupation|वय)\b",
+        re.IGNORECASE,
+    )
+    stop_m = stop_words_re.search(cleaned)
+    if stop_m:
+        cleaned = cleaned[:stop_m.start()].strip(" .:-;,।\t\r\n")
+
+    if re.search(r"\d{4}", cleaned) or len(cleaned) < 3:
+        return None
+    if "\n" in cleaned:
+        cleaned = cleaned.split("\n")[0].strip(" .:-;,।\t\r\n")
+    return cleaned if len(cleaned) >= 3 else None
+
 
 def check_donor_donee_surname_risk(
     donor_name: str | None,
@@ -1079,20 +1189,51 @@ def check_donor_donee_surname_risk(
     if any(len(t) <= 1 for t in (d_tokens[-1], e_tokens[-1])) or all(len(t) <= 1 for t in d_tokens) or all(len(t) <= 1 for t in e_tokens):
         return False, None, {"suppressed": True, "reason": "initials_only_name"}
 
-    # 5. Married female donee/donor indicators (e.g. Smt, Mrs, Sau, or relationship is daughter/sister/wife)
-    has_married_female_honorific = any(h in MARRIED_FEMALE_HONORIFICS for h in d_hons + e_hons)
-    is_married_female_relation = False
+    # 5. Married female donee/donor indicators
+    d_rel = ""
+    donor_role = ""
     if relationship_context:
         if isinstance(relationship_context, dict):
-            d_rel = str(relationship_context.get("donee_relation_to_donor") or relationship_context.get("donee_role") or "").casefold()
-            if d_rel in ("daughter", "मुलगी", "sister", "बहीण", "wife", "पत्नी", "wife_of_deceased_son"):
-                is_married_female_relation = True
+            d_rel = str(
+                relationship_context.get("donee_relation_to_donor")
+                or relationship_context.get("donee_role")
+                or ""
+            ).strip().casefold().replace("-", "_").replace(" ", "_")
+            donor_role = str(
+                relationship_context.get("donor_role") or ""
+            ).strip().casefold().replace("-", "_").replace(" ", "_")
+            if not d_rel:
+                rel_str = str(relationship_context.get("relationship") or "").strip().casefold()
+                if " to " in rel_str:
+                    parts = rel_str.split(" to ", 1)
+                    if not donor_role:
+                        donor_role = parts[0].strip().replace("-", "_").replace(" ", "_")
+                    d_rel = parts[1].strip().replace("-", "_").replace(" ", "_")
+                else:
+                    d_rel = rel_str.replace("-", "_").replace(" ", "_")
         else:
-            rc_cf = str(relationship_context).casefold()
-            if any(r in rc_cf for r in ("daughter", "मुलगी", "sister", "बहीण", "wife", "पत्नी")):
-                is_married_female_relation = True
+            rc_cf = str(relationship_context).strip().casefold()
+            if " to " in rc_cf:
+                parts = rc_cf.split(" to ", 1)
+                donor_role = parts[0].strip().replace("-", "_").replace(" ", "_")
+                d_rel = parts[1].strip().replace("-", "_").replace(" ", "_")
+            else:
+                d_rel = rc_cf.replace("-", "_").replace(" ", "_")
 
-    if has_married_female_honorific or is_married_female_relation:
+    # a) The donee has a married female honorific (Smt., Mrs., Sau., etc.)
+    donee_has_married_hons = any(h in MARRIED_FEMALE_HONORIFICS for h in e_hons)
+
+    # b) The donee's relation to donor is a female relation subject to marriage name change
+    is_donee_female_relation = d_rel in FEMALE_RELATIONS_SUBJECT_TO_MARRIAGE_NAME_CHANGE
+
+    # c) The donor has a married female honorific or is a female role gifting to her natal family
+    donor_has_married_hons = any(h in MARRIED_FEMALE_HONORIFICS for h in d_hons)
+    is_donor_female_role = donor_role in FEMALE_DONOR_ROLES
+    donor_is_female = donor_has_married_hons or is_donor_female_role
+    donee_is_natal = d_rel in NATAL_FAMILY_RELATIONS
+    donor_gifting_to_natal = donor_is_female and donee_is_natal
+
+    if donee_has_married_hons or is_donee_female_relation or donor_gifting_to_natal:
         return False, None, {"suppressed": True, "reason": "married_female_name_change"}
 
     # 6. Compare extracted surnames
@@ -1350,8 +1491,8 @@ def extract_property_schedule(
                 if amt:
                     market_values.append((page_num, amt, line_str[:300]))
 
-    # Fallback for locations, survey numbers, and areas across all lines if schedule lacked them
-    if not survey_numbers or not locations or not areas:
+    # Fallback for locations, survey numbers, and areas across all lines ONLY if document has no schedule header
+    if not has_schedule_header and (not survey_numbers or not locations or not areas):
         for page_num, line_str in all_lines:
             if not survey_numbers:
                 s_m = re.search(FIELD_PATTERNS["survey_number"], line_str, re.IGNORECASE)
@@ -1545,6 +1686,11 @@ def select_stamp_duty_rule(
     prop = property_type.strip().casefold()
     is_res_or_agri = prop in ("residential", "residential_property", "agricultural", "agricultural_land")
 
+    if rel in ("son_to_mother", "daughter_to_mother"):
+        rel = "mother"
+    elif rel in ("son_to_father", "daughter_to_father"):
+        rel = "father"
+
     if rel in ARTICLE_34_200_RELATIONS:
         if is_res_or_agri:
             return "article_34_200"
@@ -1601,6 +1747,12 @@ def evaluate_article_34_relationship(
         elif mapped_clean in ARTICLE_34_3_PERCENT_FAMILY_RELATIONS or mapped_clean in ("brother_and_brother", "sister_and_sister", "brother_and_sister"):
             e_rel = "brother"
             d_role = "brother"
+        elif "mother" in mapped_clean and ("son" in mapped_clean or "daughter" in mapped_clean) and ("to" in mapped_clean or mapped_clean.startswith("son_") or mapped_clean.startswith("daughter_")):
+            e_rel = "mother"
+            d_role = "son" if "son" in mapped_clean else "daughter"
+        elif "father" in mapped_clean and ("son" in mapped_clean or "daughter" in mapped_clean) and ("to" in mapped_clean or mapped_clean.startswith("son_") or mapped_clean.startswith("daughter_")):
+            e_rel = "father"
+            d_role = "son" if "son" in mapped_clean else "daughter"
         else:
             e_rel = mapped_clean
 
@@ -1902,6 +2054,76 @@ def assess_stamp_duty_article_34(
     donor_name = next((f.extracted_value for f in document.fields if f.field_name == "donor_name"), None)
     donee_name = next((f.extracted_value for f in document.fields if f.field_name == "donee_name"), None)
 
+    # Fallback scanning of text_by_page if donor_name or donee_name was not in document.fields
+    if donor_name is None or donee_name is None:
+        pages_to_scan = list(text_by_page)
+        if all_pages:
+            scanned_pgs = {p[0] for p in pages_to_scan}
+            for p in all_pages:
+                if p.page_number not in scanned_pgs:
+                    txt = p.ocr_text_corrected or p.ocr_text_original or p.digital_text or ""
+                    if txt:
+                        pages_to_scan.append((p.page_number, txt))
+
+        for page_num, text in pages_to_scan:
+            # 1. Recital between clauses: "Between <Donor Name> (Donor) and <Donee Name> (Donee)"
+            if donor_name is None or donee_name is None:
+                for b_pat, is_donor_first in RECITALS_BETWEEN_PARTY_PATTERNS:
+                    b_match = b_pat.search(text)
+                    if b_match:
+                        cand_a = _clean_extracted_name(b_match.group(1))
+                        cand_b = _clean_extracted_name(b_match.group(2))
+                        if is_donor_first:
+                            if donor_name is None and cand_a:
+                                donor_name = cand_a
+                            if donee_name is None and cand_b:
+                                donee_name = cand_b
+                        else:
+                            if donee_name is None and cand_a:
+                                donee_name = cand_a
+                            if donor_name is None and cand_b:
+                                donor_name = cand_b
+                    if donor_name is not None and donee_name is not None:
+                        break
+
+            # 2. Recital "donor <Name> gifts/conveys to donee <Name>"
+            if donor_name is None or donee_name is None:
+                recital_m = re.search(
+                    r"\b(?:donor|दाता|देणार)\s+([A-Za-z\u0900-\u097F\s.'-]{3,60})\s+(?:is\s+gifting|gifts|gifting|conveys|conveying|transfers|transferring|has\s+gifted)\s+(?:property\s+)?(?:to\s+)?(?:donee\s+)?([A-Za-z\u0900-\u097F\s.'-]{3,60})",
+                    text,
+                    re.IGNORECASE,
+                )
+                if recital_m:
+                    d_c = _clean_extracted_name(recital_m.group(1))
+                    e_c = _clean_extracted_name(recital_m.group(2))
+                    if donor_name is None and d_c:
+                        donor_name = d_c
+                    if donee_name is None and e_c:
+                        donee_name = e_c
+
+            # 3. Labeled lines (using extract_fields regex)
+            if donor_name is None or donee_name is None:
+                for line in text.splitlines():
+                    match = re.search(
+                        r"(donor\s*/\s*दाता|donee\s*/\s*प्राप्तकर्ता|देणार(?:\s*/\s*दाता)?|घेणार(?:\s*/\s*प्राप्तकर्ता)?|donor|donee|दाता|देणार|घेणारा?|प्राप्तकर्ता|transferor|recipient|owner|party|श्री|श्रीमती)\s*[:：.-]\s*([\w .'-]{3,100})",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    if match:
+                        label = match.group(1).casefold().split("/", 1)[0].strip()
+                        raw_val = match.group(2)
+                        cand = _clean_extracted_name(raw_val)
+                        if cand:
+                            if label in ("donor", "दाता", "देणार") and donor_name is None:
+                                donor_name = cand
+                            elif label in ("donee", "प्राप्तकर्ता", "घेणार", "घेणारा") and donee_name is None:
+                                donee_name = cand
+                    if donor_name is not None and donee_name is not None:
+                        break
+
+            if donor_name is not None and donee_name is not None:
+                break
+
     rel_res = evaluate_article_34_relationship(
         text_by_page, donor_name=donor_name, donee_name=donee_name
     )
@@ -2126,17 +2348,29 @@ def assess_stamp_duty_article_34(
         if art25_uncertain_reasons:
             status = "requires_review"
             status_reason = "; ".join(art25_uncertain_reasons)
-        else:
-            if total_paid is not None and expected_total is not None:
-                difference = total_paid - expected_total
-            status = "not_applicable"
-            diff_text = f", difference: ₹{difference:,}" if difference is not None else ""
-            status_reason = (
-                f"Article 34 concessional rate is not applicable: "
-                f"Relationship '{rel_val}' does not qualify for family gift deed concession. "
-                f"Article 25 standard conveyance applies at {duty_rate} (Location band: {location_band}). "
-                f"Total payable: ₹{expected_total:,}, actual paid: ₹{(total_paid or 0):,}{diff_text}."
-            )
+        elif total_paid is None:
+            status = "not_available"
+            status_reason = f"Article 25 standard conveyance applies at {duty_rate} (expected total ₹{expected_total:,}), but no stamp duty payment was extracted to compare."
+        elif expected_total is not None:
+            difference = total_paid - expected_total
+            if difference >= 0:
+                status = "not_applicable"
+                diff_text = f", difference: ₹{difference:,}"
+                status_reason = (
+                    f"Article 34 concessional rate is not applicable: "
+                    f"Relationship '{rel_val}' does not qualify for family gift deed concession. "
+                    f"Article 25 standard conveyance applies at {duty_rate} (Location band: {location_band}). "
+                    f"Total payable: ₹{expected_total:,}, actual paid: ₹{total_paid:,}{diff_text}."
+                )
+            else:
+                status = "short_paid"
+                status_reason = (
+                    f"Short paid under ARTICLE 25 by ₹{abs(difference):,}. "
+                    f"Article 34 concessional rate is not applicable: "
+                    f"Relationship '{rel_val}' does not qualify for family gift deed concession. "
+                    f"Article 25 standard conveyance applies at {duty_rate} (Location band: {location_band}). "
+                    f"Expected total ₹{expected_total:,} (Base: ₹{base_duty:,} + Cess: ₹{(metro_cess_amount or 0):,}), actual paid: ₹{total_paid:,}."
+                )
 
     elif cess_uncertain:
         status = "requires_review"
@@ -2407,18 +2641,31 @@ def assess_stamp_duty_article_34(
                 source_pages=source_pages_str,
             )
         )
-    if total_paid is None and rel_elig == "eligible" and document.category == "gift_deed":
-        findings_list.append(
-            ValidationFinding(
-                case_id=case_id,
-                document_id=document.id,
-                rule_id="missing_stamp_duty_paid",
-                severity="low",
-                kind="missing_information",
-                explanation="Stamp duty payment receipt details were not found in the document.",
-                source_pages=source_pages_str,
+    if total_paid is None:
+        if selected_rule == "article_25" and status == "not_available":
+            findings_list.append(
+                ValidationFinding(
+                    case_id=case_id,
+                    document_id=document.id,
+                    rule_id="missing_stamp_duty_paid",
+                    severity="low",
+                    kind="missing_information",
+                    explanation=status_reason,
+                    source_pages=source_pages_str,
+                )
             )
-        )
+        elif rel_elig == "eligible" and document.category == "gift_deed":
+            findings_list.append(
+                ValidationFinding(
+                    case_id=case_id,
+                    document_id=document.id,
+                    rule_id="missing_stamp_duty_paid",
+                    severity="low",
+                    kind="missing_information",
+                    explanation="Stamp duty payment receipt details were not found in the document.",
+                    source_pages=source_pages_str,
+                )
+            )
 
     if has_surname_mismatch and surname_explanation:
         findings_list.append(
