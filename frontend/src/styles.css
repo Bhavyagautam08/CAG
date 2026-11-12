@@ -456,3 +456,161 @@ a{color:inherit;text-decoration:none}
   gap: 6px;
   margin-top: 10px;
 }
+
+/* Extracted Identification Documents */
+.id-doc-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.id-doc-group {
+  background: #ffffff;
+  border: 1px solid #e6ebf2;
+  border-radius: 7px;
+  padding: 9px 11px;
+}
+.id-doc-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.id-doc-group-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #334259;
+}
+.id-doc-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+}
+.id-doc-count-badge.has-items {
+  background: #edf3ff;
+  color: #2b6ad4;
+}
+.id-doc-count-badge.empty {
+  background: #f1f4f8;
+  color: #7e8b9d;
+}
+.id-doc-empty {
+  font-size: 9.5px;
+  color: #8c98a8;
+  padding: 6px 8px;
+  background: #fafbfd;
+  border: 1px dashed #e5eaf1;
+  border-radius: 5px;
+}
+.id-doc-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.id-doc-card {
+  background: #f9fbfe;
+  border: 1px solid #e5ebf3;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.id-doc-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.id-doc-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.id-role-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.id-role-badge.donor {
+  background: #edf3ff;
+  color: #2458a6;
+}
+.id-role-badge.donee {
+  background: #eaf7f2;
+  color: #1e7a56;
+}
+.id-role-badge.witness {
+  background: #fff7e9;
+  color: #9d681c;
+}
+.id-role-badge.unknown {
+  background: #f1f3f7;
+  color: #5d6e85;
+}
+.id-subtype-tag {
+  background: #f0f4fa;
+  color: #4b5b71;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+}
+.id-confidence-pill {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 8.5px;
+  font-weight: 650;
+}
+.id-confidence-pill.high {
+  background: #eaf7f2;
+  color: #1e7a56;
+}
+.id-confidence-pill.medium {
+  background: #fff7e9;
+  color: #9d681c;
+}
+.id-confidence-pill.low {
+  background: #fff0ef;
+  color: #b33939;
+}
+.id-doc-card-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 6px 10px;
+}
+.id-doc-card-meta code {
+  background: #edf1f6;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #24344d;
+}
+.id-doc-snippet {
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: #4b5b71;
+  background: #ffffff;
+  border: 1px solid #eaeff5;
+  border-radius: 4px;
+  padding: 5px 7px;
+  overflow-wrap: anywhere;
+}
+.id-doc-snippet b {
+  font-size: 8.5px;
+  color: #8c98a8;
+  text-transform: uppercase;
+}

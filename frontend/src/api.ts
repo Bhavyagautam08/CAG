@@ -137,6 +137,36 @@ export interface Finding {
   review_status: string;
 }
 
+export interface IdentificationDocumentItem {
+  doc_type: "pan_card" | "aadhaar_card" | "other_id" | string;
+  id_sub_type: string;
+  id_number: string | null;
+  holder_name: string | null;
+  party_role: "Donor" | "Donee" | "Witness" | "Unknown" | string;
+  dob_or_age: string | null;
+  page_numbers: number[];
+  confidence: "high" | "medium" | "low" | string;
+  evidence_snippet: string;
+}
+
+export interface IdentificationDocumentsGroup {
+  status: "found" | "not_found" | "uncertain" | string;
+  summary_counts: {
+    pan_card: number;
+    aadhaar_card: number;
+    other_id: number;
+    total: number;
+  };
+  grouped_documents?: {
+    pan_card: IdentificationDocumentItem[];
+    aadhaar_card: IdentificationDocumentItem[];
+    other_id: IdentificationDocumentItem[];
+  };
+  pan_card: IdentificationDocumentItem[];
+  aadhaar_card: IdentificationDocumentItem[];
+  other_id: IdentificationDocumentItem[];
+}
+
 export interface Document {
   id: string;
   ingestion_id: string;
@@ -155,6 +185,7 @@ export interface Document {
   pages?: Page[];
   findings?: Finding[];
   stamp_duty_assessment?: StampDutyAssessment | null;
+  identification_documents?: IdentificationDocumentsGroup | null;
 }
 
 export interface StampDutyAssessment {
@@ -184,6 +215,7 @@ export interface StampDutyAssessment {
   effective_date?: string | null;
   calculation_components?: any;
   source_evidence?: any;
+  identification_documents?: IdentificationDocumentsGroup | null;
   market_value: number | null;
   base_stamp_duty: number | null;
   metro_cess_rate: number | null;

@@ -779,6 +779,119 @@ def _draw_stamp_duty_assessment(
     return y
 
 
+def _parse_id_documents_for_report(assessment: Any) -> dict[str, list[dict[str, Any]]]:
+    empty: dict[str, list[dict[str, Any]]] = {"pan_card": [], "aadhaar_card": [], "other_id": []}
+    raw = getattr(assessment, "identification_documents", None)
+    data: Any = raw
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return empty
+    if not isinstance(data, dict):
+        return empty
+    grouped_src = data.get("grouped_documents") if isinstance(data.get("grouped_documents"), dict) else data
+    return {
+        "pan_card": list(grouped_src.get("pan_card") or data.get("pan_card") or []),
+        "aadhaar_card": list(grouped_src.get("aadhaar_card") or data.get("aadhaar_card") or []),
+        "other_id": list(grouped_src.get("other_id") or data.get("other_id") or []),
+    }
+
+
+def _draw_identification_documents(
+    report_canvas: canvas.Canvas,
+    assessment: Any,
+    x: float,
+    y: float,
+    max_width: float,
+    font_name: str,
+    continue_panel_fn: Any,
+) -> float:
+    id_docs = _parse_id_documents_for_report(assessment)
+    if y - 42 < 57:
+        y = continue_panel_fn("Extracted Identification Documents")
+    else:
+        y -= 4
+    y = _draw_section(report_canvas, x, y, "Extracted Identification Documents")
+
+    groups: tuple[tuple[str, str], ...] = (
+        ("pan_card", "PAN Card Details"),
+        ("aadhaar_card", "Aadhaar Card Details"),
+        ("other_id", "Other Identification Documents"),
+    )
+
+    inner_width = max_width - 14
+    font_size = 7.3
+    leading = 9.8
+
+    for group_key, group_title in groups:
+        items = id_docs.get(group_key) or []
+        if y - 34 < 57:
+            y = continue_panel_fn("Extracted Identification Documents (continued)")
+
+        report_canvas.setFillColor(ACCENT)
+        report_canvas.setFont("Helvetica-Bold", 8)
+        report_canvas.drawString(x, y, group_title, shaping=True)
+        y -= 13
+
+        if not items:
+            empty_msg = f"No {group_title} detected"
+            empty_height = 22
+            if y - empty_height < 57:
+                y = continue_panel_fn("Extracted Identification Documents (continued)")
+            report_canvas.setFillColor(white)
+            report_canvas.roundRect(x, y - empty_height + 3, max_width, empty_height, 4, fill=1, stroke=0)
+            report_canvas.setFillColor(MUTED)
+            report_canvas.setFont(font_name, 7.5)
+            report_canvas.drawString(x + 7, y - 12, empty_msg, shaping=True)
+            y -= empty_height + 5
+            continue
+
+        for item in items:
+            party_role = str(item.get("party_role") or "Unknown")
+            holder_name = str(item.get("holder_name") or "Not extracted")
+            id_number = str(item.get("id_number") or "Not extracted")
+            id_sub_type = str(item.get("id_sub_type") or "").replace("_", " ").strip()
+            if group_key == "other_id" and id_sub_type:
+                id_display = f"{id_number} ({id_sub_type.title()})"
+            else:
+                id_display = id_number
+            raw_pages = item.get("page_numbers") or []
+            pages_str = ", ".join(str(p) for p in raw_pages) if raw_pages else "N/A"
+            dob_or_age = item.get("dob_or_age")
+            dob_suffix = f"  |  DOB/Age: {dob_or_age}" if dob_or_age else ""
+
+            styled_lines: list[tuple[str, Any, bool]] = []
+            for line in _wrap(f"Party Role: {party_role}  |  ID Number: {id_display}", font_name, font_size, inner_width):
+                styled_lines.append((line, INK, True))
+            for line in _wrap(f"Holder Name: {holder_name}  |  Page(s): {pages_str}{dob_suffix}", font_name, font_size, inner_width):
+                styled_lines.append((line, INK, False))
+
+            idx = 0
+            while idx < len(styled_lines):
+                avail_lines = max(1, int((y - 57 - 12) // leading))
+                remaining = len(styled_lines) - idx
+                if remaining <= 24 and remaining > avail_lines:
+                    y = continue_panel_fn("Extracted Identification Documents (continued)")
+                    avail_lines = max(1, int((y - 57 - 12) // leading))
+
+                take = min(remaining, max(1, min(avail_lines, MAX_FIELD_LINES_PER_SHEET)))
+                chunk = styled_lines[idx:idx + take]
+                block_height = max(24, len(chunk) * leading + 10)
+                if y - block_height < 57:
+                    y = continue_panel_fn("Extracted Identification Documents (continued)")
+                report_canvas.setFillColor(white)
+                report_canvas.roundRect(x, y - block_height + 3, max_width, block_height, 4, fill=1, stroke=0)
+                for line_idx, (line_text, color, _is_head) in enumerate(chunk):
+                    report_canvas.setFillColor(color)
+                    report_canvas.setFont(font_name, font_size)
+                    report_canvas.drawString(x + 7, y - 11 - line_idx * leading, line_text, shaping=True)
+                y -= block_height + 4
+                idx += take
+
+    return y
+
+
 def _draw_report_page(
     report_canvas: canvas.Canvas,
     ocr_layout_image: Image.Image,
@@ -881,6 +994,15 @@ def _draw_report_page(
 
     if assessment is not None:
         y = _draw_stamp_duty_assessment(
+            report_canvas,
+            assessment,
+            x,
+            y,
+            max_width,
+            font_name,
+            continue_panel,
+        )
+        y = _draw_identification_documents(
             report_canvas,
             assessment,
             x,

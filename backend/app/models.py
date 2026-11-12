@@ -308,6 +308,7 @@ class StampDutyAssessment(Base):
     effective_date: Mapped[str | None] = mapped_column(String(32), nullable=True, default="2017-05-16")
     calculation_components: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identification_documents: Mapped[str | None] = mapped_column(Text, nullable=True)
     market_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     base_duty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     metro_cess_rate: Mapped[float | None] = mapped_column(Float, nullable=True)

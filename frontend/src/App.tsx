@@ -7,7 +7,7 @@ import {
   Clock3, FileCheck2, FileDown, FileText, Files, LayoutDashboard, LockKeyhole, Menu, Search, ShieldCheck,
   ImagePlus, RotateCcw, Trash2, Upload, X,
 } from "lucide-react";
-import { api, apiBase, ComparisonDetail, ComparisonRun, DashboardData, Document, download, Field, StampDutyAssessment, StampDutyAssessmentUpdate, updateStampDutyAssessment, uploadImages, uploadPdf } from "./api";
+import { api, apiBase, ComparisonDetail, ComparisonRun, DashboardData, Document, download, Field, IdentificationDocumentItem, IdentificationDocumentsGroup, StampDutyAssessment, StampDutyAssessmentUpdate, updateStampDutyAssessment, uploadImages, uploadPdf } from "./api";
 
 type Ingestion = { id: string; filename: string; source_type: "pdf" | "image"; status: string; progress: number; stage?: string; error: string | null };
 type CaseItem = { id: string; title: string; reference: string | null; status: string; documents: Document[]; people: { id: string; name: string; relationship: string }[]; properties: { id: string; identifier: string; description: string | null }[] };
@@ -1241,6 +1241,12 @@ function StampDutyAssessmentPanel({
             )}
           </div>
 
+          {/* Extracted Identification Documents */}
+          <IdentificationDocumentsSection
+            idDocs={assessment?.identification_documents ?? doc.identification_documents}
+            onJumpPage={onJumpPage}
+          />
+
           {/* Financial Assessment Breakdown */}
           <div className="sda-section">
             <div className="sda-section-title">Financial calculation breakdown</div>
@@ -1349,6 +1355,114 @@ function StampDutyAssessmentPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function IdentificationDocumentsSection({
+  idDocs,
+  onJumpPage,
+}: {
+  idDocs?: IdentificationDocumentsGroup | null;
+  onJumpPage: (page: number) => void;
+}) {
+  const groups: Array<{
+    key: "pan_card" | "aadhaar_card" | "other_id";
+    title: string;
+    emptyText: string;
+  }> = [
+    { key: "pan_card", title: "PAN Card", emptyText: "No PAN Card details detected." },
+    { key: "aadhaar_card", title: "Aadhaar Card", emptyText: "No Aadhaar Card details detected." },
+    { key: "other_id", title: "Other Identification Documents", emptyText: "No Other Identification Documents detected." },
+  ];
+
+  return (
+    <div className="sda-section">
+      <div className="sda-section-title">Extracted Identification Documents</div>
+      <div className="id-doc-groups">
+        {groups.map(({ key, title, emptyText }) => {
+          const items: IdentificationDocumentItem[] = idDocs?.grouped_documents?.[key] ?? idDocs?.[key] ?? [];
+          const count = idDocs?.summary_counts?.[key] ?? items.length;
+          return (
+            <div className="id-doc-group" key={key}>
+              <div className="id-doc-group-header">
+                <span className="id-doc-group-title">{title}</span>
+                <span className={`id-doc-count-badge ${count > 0 ? "has-items" : "empty"}`}>
+                  {count}
+                </span>
+              </div>
+              {items.length === 0 ? (
+                <div className="id-doc-empty">{emptyText}</div>
+              ) : (
+                <div className="id-doc-card-list">
+                  {items.map((item, idx) => {
+                    const roleKey = (item.party_role || "Unknown").toLowerCase();
+                    const confKey = (item.confidence || "medium").toLowerCase();
+                    return (
+                      <div className="id-doc-card" key={`${key}-${item.id_number ?? "none"}-${idx}`}>
+                        <div className="id-doc-card-header">
+                          <div className="id-doc-card-badges">
+                            <span className={`id-role-badge ${roleKey}`}>
+                              {item.party_role || "Unknown"}
+                            </span>
+                            {key === "other_id" && item.id_sub_type && (
+                              <span className="id-subtype-tag">{humanize(item.id_sub_type)}</span>
+                            )}
+                          </div>
+                          <span className={`id-confidence-pill ${confKey}`}>
+                            {humanize(confKey)} confidence
+                          </span>
+                        </div>
+                        <div className="id-doc-card-meta">
+                          <div className="sda-field">
+                            <span className="sda-label">Holder Name</span>
+                            <span className="sda-val">{item.holder_name || "Not extracted"}</span>
+                          </div>
+                          <div className="sda-field">
+                            <span className="sda-label">ID Number</span>
+                            <span className="sda-val">
+                              <code>{item.id_number || "Not extracted"}</code>
+                            </span>
+                          </div>
+                          {item.dob_or_age && (
+                            <div className="sda-field">
+                              <span className="sda-label">DOB / Age</span>
+                              <span className="sda-val">{item.dob_or_age}</span>
+                            </div>
+                          )}
+                          <div className="sda-field">
+                            <span className="sda-label">Page(s)</span>
+                            <div className="sda-page-badges">
+                              {item.page_numbers?.length ? (
+                                item.page_numbers.map((p) => (
+                                  <button
+                                    key={p}
+                                    type="button"
+                                    className="source-page-jump-btn"
+                                    onClick={() => onJumpPage(p)}
+                                    title={`Jump to page ${p}`}
+                                  >
+                                    Page {p}
+                                  </button>
+                                ))
+                              ) : (
+                                <span className="muted-cell">N/A</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="id-doc-snippet">
+                          <b>OCR Evidence:</b> <span>{item.evidence_snippet || "N/A"}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

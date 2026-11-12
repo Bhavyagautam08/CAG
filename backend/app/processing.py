@@ -1094,7 +1094,7 @@ def _clean_extracted_name(raw_name: str | None) -> str | None:
         return None
     cleaned = raw_name.strip(" .:-;,।\t\r\n")
     stop_words_re = re.compile(
-        r"\b(?:who\s+is|is\s+gifting|is\s+the|gifts|conveys|transfers|out\s+of|residing|resides|aged|occupation|वय)\b",
+        r"\b(?:who\s+is|is\s+gifting|is\s+the|gifts|conveys|transfers|out\s+of|residing|resides|aged|age|occupation|holding|bearing|having|dob|date\s+of\s+birth|pan|aadhaar|aadhar|uidai|voter|epic|passport|driving\s+licen[cs]e|s/o|d/o|w/o|son\s+of|daughter\s+of|wife\s+of|hereinafter|वय|पैन|पॅन|आधार)\b",
         re.IGNORECASE,
     )
     stop_m = stop_words_re.search(cleaned)
@@ -2040,6 +2040,930 @@ def resolve_authoritative_location_band(
     )
 
 
+_ID_CARD_HEADER_RE = re.compile(
+    r"\b(?:income\s+tax\s+department|permanent\s+account\s+number|uidai|unique\s+identification(?:\s+authority\s+of\s+india)?|aadhaar|aadhar|election\s+commission(?:\s+of\s+india)?|elector\s+photo\s+identity|voter\s*(?:'?s)?\s*id|epic\s*(?:no\.?|number)|passport(?:\s*(?:no\.?|number))?|driving\s+licen[cs]e|transport\s+department)\b|आयकर\s+विभाग|आधार|मतदार\s*ओळखपत्र|मतदाता\s*पहचान|पासपोर्ट|ड्रायव्हिंग\s+लायसन्स",
+    re.IGNORECASE,
+)
+_PAN_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{5}[0-9]{4}[A-Za-z])(?![A-Za-z0-9])")
+_PAN_LABELED_RE = re.compile(
+    r"\b(?:pan(?:\s*(?:no\.?|number|card))?|permanent\s+account\s+number|पैन(?:\s*क्र\.?)?|पॅन(?:\s*क्र\.?)?)\s*[:#-]?\s*([A-Za-z]{5}\s*[0-9]{4}\s*[A-Za-z])(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_PAN_FALSE_PREFIX_RE = re.compile(
+    r"(?:registration|reg\.?|challan|receipt|property\s*id|survey|gat|order\s*ref|gstin|ifsc)\s*(?:no\.?|number|ref(?:erence)?)?\s*[:#-]?\s*$",
+    re.IGNORECASE,
+)
+_AADHAAR_CONTEXT_RE = re.compile(
+    r"\b(?:aadhaar|aadhar|uidai|unique\s+identification(?:\s+authority\s+of\s+india)?)\b|आधार|भारतीय\s+विशिष्ट\s+(?:ओळख|पहचान)",
+    re.IGNORECASE,
+)
+_AADHAAR_RAW_RE = re.compile(r"(?<!\d)([2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4})(?!\d)")
+_AADHAAR_MASKED_RE = re.compile(
+    r"(?:[xX*•#]{4}[\s-]?){2}(\d{4})(?!\d)|[xX*•#]{8}(\d{4})(?!\d)",
+    re.IGNORECASE,
+)
+_AADHAAR_VID_LINE_RE = re.compile(r"\b(?:vid|virtual\s*id)\b\s*[:#-]?", re.IGNORECASE)
+_VOTER_CONTEXT_RE = re.compile(
+    r"\b(?:voter\s*(?:'?s)?\s*id|epic(?:\s*(?:no\.?|number|card))?|election\s+commission(?:\s+of\s+india)?|elector\s+photo\s+identity)\b|मतदार\s*ओळखपत्र|मतदाता\s*पहचान",
+    re.IGNORECASE,
+)
+_VOTER_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{3}[0-9]{7})(?![A-Za-z0-9])")
+_VOTER_LABELED_RE = re.compile(
+    r"(?:voter\s*(?:'?s)?\s*id|epic|मतदार\s*ओळखपत्र|मतदाता\s*पहचान)\s*(?:no\.?|number|card|क्र\.?)?\s*[:#-]?\s*([A-Za-z]{2,3}[0-9/-]{6,14})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_PASSPORT_CONTEXT_RE = re.compile(
+    r"\b(?:passport(?:\s*(?:no\.?|number))?|republic\s+of\s+india)\b|पासपोर्ट",
+    re.IGNORECASE,
+)
+_PASSPORT_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][0-9]{7})(?![A-Za-z0-9])")
+_PASSPORT_LABELED_RE = re.compile(
+    r"(?:passport|पासपोर्ट)\s*(?:no\.?|number|क्र\.?)?\s*[:#-]?\s*([A-Za-z][0-9]{7})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_DL_CONTEXT_RE = re.compile(
+    r"\b(?:driving\s+licen[cs]e|d\.?\s*l\.?\s*(?:no\.?|number)|transport\s+department)\b|ड्रायव्हिंग\s+लायसन्स|वाहन\s+चालन",
+    re.IGNORECASE,
+)
+_DL_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z]{2}[-\s]?[0-9]{2}[-\s]?(?:19|20)[0-9]{2}[-\s]?[0-9]{5,7})(?![A-Za-z0-9])"
+)
+_DL_LABELED_RE = re.compile(
+    r"(?:driving\s+licen[cs]e|d\.?\s*l\.?|ड्रायव्हिंग\s+लायसन्स)\s*(?:no\.?|number|क्र\.?)?\s*[:#-]?\s*([A-Za-z]{2}[A-Za-z0-9/-]{6,18})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_OTHER_GOVT_ID_LABELED_RE = re.compile(
+    r"\b(?:(ration\s+card)|(oci\s+card)|(?:government|govt\.?)\s+id)\s*(?:no\.?|number|क्र\.?)?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9/-]{4,20})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_INSTITUTIONAL_HEADER_LINE_RE = re.compile(
+    r"^(?:government\s+of\s+india|govt\.?\s+of\s+india|income\s+tax\s+department|unique\s+identification|uidai|election\s+commission|elector\s+photo|permanent\s+account\s+number|republic\s+of\s+india|transport\s+department|indian\s+union\s+driving|aadhaar|mera\s+aadhaar|भारत\s+सरकार|आयकर\s+विभाग)",
+    re.IGNORECASE,
+)
+_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def _redact_aadhaar_digits(text: str) -> str:
+    """Mask raw 12-digit Aadhaar numbers (excluding 16-digit VIDs) as XXXX-XXXX-NNNN."""
+    def _repl(match: re.Match[str]) -> str:
+        start, end = match.span()
+        before = text[max(0, start - 6):start]
+        after = text[end:min(len(text), end + 6)]
+        if re.search(r"\d{4}[\s-]$", before) or re.match(r"^[\s-]\d{4}", after):
+            return match.group(0)
+        line_start = text.rfind("\n", 0, start) + 1
+        if _AADHAAR_VID_LINE_RE.search(text[line_start:start]):
+            return match.group(0)
+        digits = re.sub(r"\D", "", match.group(1))
+        return f"XXXX-XXXX-{digits[-4:]}" if len(digits) == 12 else "[Aadhaar Redacted]"
+
+    return _AADHAAR_RAW_RE.sub(_repl, text)
+
+
+def _normalize_id_pages(
+    pages: list[tuple[int, str]] | list[Page] | str,
+    all_pages: list[Page] | list[tuple[int, str]] | None = None,
+) -> tuple[list[tuple[int, str]], set[int]]:
+    """Normalize input pages to [(page_number, text), ...] and flag ID card pages."""
+    normalized: list[tuple[int, str]] = []
+    id_card_pages: set[int] = set()
+    seen_pages: set[int] = set()
+
+    if isinstance(pages, str):
+        items: list[Any] = [(1, pages)]
+    else:
+        items = list(pages)
+
+    def _consume(item: Any, attached_only: bool = False) -> None:
+        if isinstance(item, tuple) and len(item) >= 2:
+            pg = int(item[0])
+            txt = str(item[1] or "")
+            cat = None
+        else:
+            pg = int(getattr(item, "page_number", 1))
+            txt = str(
+                getattr(item, "ocr_text_corrected", None)
+                or getattr(item, "ocr_text_original", None)
+                or getattr(item, "digital_text", None)
+                or ""
+            )
+            cat = getattr(item, "category", None)
+
+        if pg in seen_pages:
+            return
+        if attached_only:
+            has_id_signal = cat == "identity_document" or bool(_ID_CARD_HEADER_RE.search(txt))
+            if not has_id_signal:
+                return
+        seen_pages.add(pg)
+        normalized.append((pg, txt))
+        if cat == "identity_document" or (
+            _ID_CARD_HEADER_RE.search(txt)
+            and not re.search(r"\b(?:gift\s+deed|indenture\s+of\s+gift|schedule\s+of\s+property)\b|दानपत्र|बक्षीसपत्र", txt, re.IGNORECASE)
+        ):
+            id_card_pages.add(pg)
+
+    for item in items:
+        _consume(item, attached_only=False)
+    if all_pages:
+        for item in all_pages:
+            _consume(item, attached_only=True)
+
+    return normalized, id_card_pages
+
+
+def _extract_party_names_from_pages(
+    pages_to_scan: list[tuple[int, str]],
+    donor_name: str | None = None,
+    donee_name: str | None = None,
+) -> tuple[str | None, str | None, list[str]]:
+    """Extract donor, donee, and witness names from recital clauses and labeled lines."""
+    witness_names: list[str] = []
+    for _, text in pages_to_scan:
+        if donor_name is None or donee_name is None:
+            for b_pat, is_donor_first in RECITALS_BETWEEN_PARTY_PATTERNS:
+                b_match = b_pat.search(text)
+                if b_match:
+                    cand_a = _clean_extracted_name(b_match.group(1))
+                    cand_b = _clean_extracted_name(b_match.group(2))
+                    if is_donor_first:
+                        if donor_name is None and cand_a:
+                            donor_name = cand_a
+                        if donee_name is None and cand_b:
+                            donee_name = cand_b
+                    else:
+                        if donee_name is None and cand_a:
+                            donee_name = cand_a
+                        if donor_name is None and cand_b:
+                            donor_name = cand_b
+                if donor_name is not None and donee_name is not None:
+                    break
+
+        if donor_name is None or donee_name is None:
+            recital_m = re.search(
+                r"\b(?:donor|दाता|देणार)\s+([A-Za-z\u0900-\u097F\s.'-]{3,60})\s+(?:is\s+gifting|gifts|gifting|conveys|conveying|transfers|transferring|has\s+gifted)\s+(?:property\s+)?(?:to\s+)?(?:donee\s+)?([A-Za-z\u0900-\u097F\s.'-]{3,60})",
+                text,
+                re.IGNORECASE,
+            )
+            if recital_m:
+                d_c = _clean_extracted_name(recital_m.group(1))
+                e_c = _clean_extracted_name(recital_m.group(2))
+                if donor_name is None and d_c:
+                    donor_name = d_c
+                if donee_name is None and e_c:
+                    donee_name = e_c
+
+        for line in text.splitlines():
+            match = re.search(
+                r"(donor\s*/\s*दाता|donee\s*/\s*प्राप्तकर्ता|देणार(?:\s*/\s*दाता)?|घेणार(?:\s*/\s*प्राप्तकर्ता)?|donor|donee|दाता|देणार|घेणारा?|प्राप्तकर्ता|witness(?:\s*\d+)?|साक्षीदार(?:\s*\d+)?|गवाह(?:\s*\d+)?|transferor|recipient|owner|party|श्री|श्रीमती)\s*[:：.-]\s*([\w\u0900-\u097F .'-]{3,100})",
+                line,
+                re.IGNORECASE,
+            )
+            if match:
+                label = re.sub(r"\s*\d+$", "", match.group(1).casefold().split("/", 1)[0].strip())
+                cand = _clean_extracted_name(match.group(2))
+                if cand:
+                    if label in ("donor", "दाता", "देणार") and donor_name is None:
+                        donor_name = cand
+                    elif label in ("donee", "प्राप्तकर्ता", "घेणार", "घेणारा") and donee_name is None:
+                        donee_name = cand
+                    elif label in ("witness", "साक्षीदार", "गवाह") and cand not in witness_names:
+                        witness_names.append(cand)
+
+    return donor_name, donee_name, witness_names
+
+
+def _name_tokens(name: str | None) -> list[str]:
+    if not name:
+        return []
+    raw_words = [
+        w.strip(".,;:'\"()[]{}<>/-")
+        for w in re.split(r"[\s,;:.()/-]+", name)
+        if w.strip(".,;:'\"()[]{}<>/-")
+    ]
+    return [w.casefold() for w in raw_words if w.casefold() not in NAME_HONORIFICS]
+
+
+def _match_party_role_by_name(
+    holder_name: str | None,
+    donor_name: str | None,
+    donee_name: str | None,
+    witness_names: list[str] | None = None,
+) -> str:
+    """Match an ID holder name against Donor, Donee, or Witness names without surname-only guessing."""
+    h_toks = _name_tokens(holder_name)
+    if not h_toks:
+        return "Unknown"
+
+    def _score_match(cand_name: str | None) -> tuple[bool, int]:
+        c_toks = _name_tokens(cand_name)
+        if not c_toks:
+            return False, 0
+        if h_toks == c_toks:
+            return True, len(h_toks) + 10
+        h_set, c_set = set(h_toks), set(c_toks)
+        overlap = h_set & c_set
+        if len(overlap) >= 2 and (h_set <= c_set or c_set <= h_set or (h_toks[0] == c_toks[0] and h_toks[-1] == c_toks[-1])):
+            return True, len(overlap)
+        # Single-word first name fallback only if unique given-name match with >=1 overlap and other tokens don't conflict
+        if len(h_toks) >= 2 and len(c_toks) >= 2 and h_toks[0] == c_toks[0] and h_toks[-1] == c_toks[-1]:
+            return True, len(overlap)
+        return False, 0
+
+    d_ok, d_score = _score_match(donor_name)
+    e_ok, e_score = _score_match(donee_name)
+
+    if d_ok and e_ok:
+        if d_score > e_score:
+            return "Donor"
+        if e_score > d_score:
+            return "Donee"
+        return "Unknown"
+    if d_ok:
+        return "Donor"
+    if e_ok:
+        return "Donee"
+    for w_name in witness_names or []:
+        w_ok, _ = _score_match(w_name)
+        if w_ok:
+            return "Witness"
+    return "Unknown"
+
+
+def _extract_dob_or_age(text: str) -> str | None:
+    dob_m = re.search(
+        r"\b(?:d\.?o\.?b\.?|date\s+of\s+birth|birth\s+date|जन्म\s*(?:तिथि|तारीख|दिनांक))\s*[:#-]?\s*([0-3]?\d[/-][01]?\d[/-](?:19|20)\d{2})",
+        text,
+        re.IGNORECASE,
+    )
+    if dob_m:
+        return dob_m.group(1).strip()
+
+    yob_m = re.search(
+        r"\b(?:year\s+of\s+birth|y\.?o\.?b\.?|जन्म\s*वर्ष)\s*[:#-]?\s*((?:19|20)\d{2})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if yob_m:
+        return yob_m.group(1).strip()
+
+    age_m = re.search(
+        r"(?:\baged?(?:\s+about)?\b|वय)\s*[:#-]?\s*([1-9]\d?(?:\s*(?:years?|yrs?|वर्षे|साल))?)",
+        text,
+        re.IGNORECASE,
+    )
+    if age_m:
+        val = age_m.group(1).strip()
+        if val.isdigit():
+            return f"{val} years"
+        return val
+    return None
+
+
+def _extract_cardholder_name(
+    page_text: str,
+    known_names: list[str] | None = None,
+) -> str | None:
+    """Extract holder name from an attached ID card page while ignoring parent/spouse names."""
+    lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
+    skip_label_re = re.compile(
+        r"\b(?:father|husband|mother|spouse|s/o|d/o|w/o|c/o|vid|virtual\s*id|aadhaar|aadhar|pan|epic|passport|driving)\b|पिता|पती|आई|वडिलांचे|पतीचे",
+        re.IGNORECASE,
+    )
+
+    # Passport Given Name + Surname
+    surname_m = re.search(r"\bsurname\s*[:#-]?\s*([A-Za-z][A-Za-z .'-]{1,40})", page_text, re.IGNORECASE)
+    given_m = re.search(r"\bgiven\s+names?(?:\(s\))?\s*[:#-]?\s*([A-Za-z][A-Za-z .'-]{1,40})", page_text, re.IGNORECASE)
+    if given_m and surname_m:
+        g_clean = _clean_extracted_name(given_m.group(1))
+        s_clean = _clean_extracted_name(surname_m.group(1))
+        if g_clean and s_clean:
+            return f"{g_clean} {s_clean}"
+
+    for idx, line in enumerate(lines):
+        if skip_label_re.search(line):
+            continue
+        # Single-line labeled Name: ...
+        m = re.match(
+            r"^(?:elector'?s\s+name|cardholder'?s?\s+name|holder'?s?\s+name|name|नाम|नाव)\s*[:#-]\s*(.+)$",
+            line,
+            re.IGNORECASE,
+        )
+        if m:
+            cand = _clean_extracted_name(m.group(1))
+            if cand and not _INSTITUTIONAL_HEADER_LINE_RE.match(cand):
+                return cand
+        # Two-line PAN format: "Name" on one line, actual name on the next line
+        if re.match(r"^(?:name|elector'?s\s+name|नाम|नाव)$", line, re.IGNORECASE) and idx + 1 < len(lines):
+            nxt = lines[idx + 1]
+            if not skip_label_re.search(nxt) and not _INSTITUTIONAL_HEADER_LINE_RE.match(nxt):
+                cand = _clean_extracted_name(nxt)
+                if cand:
+                    return cand
+
+    # Check if an exact known party name appears on the ID card page
+    page_cf = page_text.casefold()
+    for kname in known_names or []:
+        if kname and len(_name_tokens(kname)) >= 2 and kname.casefold() in page_cf:
+            return kname
+
+    # Aadhaar / Card fallback: scan upward from DOB / Year of Birth / YOB / Aadhaar / Gender
+    for idx, line in enumerate(lines):
+        if idx > 0 and re.search(
+            r"\b(?:dob|d\.?o\.?b\.?|date\s+of\s+birth|year\s+of\s+birth|yob|male|female|s/o|d/o|w/o|aadhaar|aadhar)\b|जन्म|आधार",
+            line,
+            re.IGNORECASE,
+        ):
+            for back in range(idx - 1, max(-1, idx - 3), -1):
+                prev = lines[back]
+                if (
+                    not skip_label_re.search(prev)
+                    and not _INSTITUTIONAL_HEADER_LINE_RE.match(prev)
+                    and not _PAN_NUMBER_RE.fullmatch(prev.strip())
+                    and not re.search(r"\d", prev)
+                ):
+                    cand = _clean_extracted_name(prev)
+                    if cand:
+                        return cand
+    return None
+
+
+def _split_multi_party_clauses(
+    text: str,
+    donor_name: str | None,
+    donee_name: str | None,
+) -> list[str]:
+    """Split text into sentences and split 'Between <Donor> and <Donee>' only across distinct parties."""
+    raw_segments = re.split(
+        r"(?<!\bNo\.)(?<!\bMr\.)(?<!\bMs\.)(?<!\bDr\.)(?<!\bSt\.)(?<!\bRs\.)(?<!\bMrs\.)(?<!\bSmt\.)(?<!\bShri\.)(?<=[.;।!?\n])\s+|\n+",
+        text,
+        flags=re.IGNORECASE,
+    )
+    clauses: list[str] = []
+    d_first = _name_tokens(donor_name)[0] if _name_tokens(donor_name) else None
+    e_first = _name_tokens(donee_name)[0] if _name_tokens(donee_name) else None
+
+    for seg in raw_segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        split_done = False
+        for and_m in re.finditer(r"\s+\b(?:and|व|आणि)\b\s+", seg, re.IGNORECASE):
+            left = seg[:and_m.start()]
+            right = seg[and_m.end():]
+            left_cf, right_cf = left.casefold(), right.casefold()
+            left_has_donor = bool(re.search(r"\bdonor\b|दाता|देणार", left_cf)) or bool(d_first and d_first in left_cf)
+            right_has_donee = bool(re.search(r"\bdonee\b|प्राप्तकर्ता|घेणार", right_cf)) or bool(e_first and e_first in right_cf)
+            left_has_donee = bool(re.search(r"\bdonee\b|प्राप्तकर्ता|घेणार", left_cf)) or bool(e_first and e_first in left_cf)
+            right_has_donor = bool(re.search(r"\bdonor\b|दाता|देणार", right_cf)) or bool(d_first and d_first in right_cf)
+            right_has_witness = bool(re.search(r"\bwitness\b|साक्षीदार|गवाह", right_cf))
+            if (left_has_donor and (right_has_donee or right_has_witness)) or (left_has_donee and (right_has_donor or right_has_witness)):
+                clauses.extend([left.strip(), right.strip()])
+                split_done = True
+                break
+        if not split_done:
+            clauses.append(seg)
+    return clauses
+
+
+def _detect_clause_role_and_holder(
+    clause: str,
+    active_block_role: str | None,
+    donor_name: str | None,
+    donee_name: str | None,
+    witness_names: list[str],
+    card_holder_name: str | None = None,
+    is_id_card_page: bool = False,
+) -> tuple[str, str | None]:
+    has_donor_kw = bool(re.search(r"\b(?:the\s+)?donor\b|दाता|देणार", clause, re.IGNORECASE))
+    has_donee_kw = bool(re.search(r"\b(?:the\s+)?donee\b|प्राप्तकर्ता|घेणार|घेणारा", clause, re.IGNORECASE))
+    has_witness_kw = bool(re.search(r"\bwitness(?:\s*\d+)?\b|साक्षीदार|गवाह", clause, re.IGNORECASE))
+
+    clause_role: str | None = None
+    if has_donor_kw and not has_donee_kw and not has_witness_kw:
+        clause_role = "Donor"
+    elif has_donee_kw and not has_donor_kw and not has_witness_kw:
+        clause_role = "Donee"
+    elif has_witness_kw and not has_donor_kw and not has_donee_kw:
+        clause_role = "Witness"
+
+    holder_name: str | None = None
+    lbl_m = re.search(
+        r"(?:donor|donee|witness(?:\s*\d+)?|दाता|देणार|प्राप्तकर्ता|घेणार|घेणारा|साक्षीदार|गवाह)\s*[:：.-]\s*([\w\u0900-\u097F .'-]{3,80})",
+        clause,
+        re.IGNORECASE,
+    )
+    if lbl_m:
+        holder_name = _clean_extracted_name(lbl_m.group(1))
+    if not holder_name:
+        btw_m = re.search(
+            r"^\s*(?:between\s+|and\s+)?(?:(?:shri|smt\.?|mrs\.?|mr\.?|ms\.?|dr\.?|श्री|श्रीमती|सौ\.?)\s+)?([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F .'-]{2,60}?)(?:\s*,\s*|\s+(?:aged?|age|holding|bearing|having|pan|aadhaar|aadhar|voter|epic|passport|driving|\())",
+            clause,
+            re.IGNORECASE,
+        )
+        if btw_m:
+            cand = _clean_extracted_name(btw_m.group(1))
+            if cand and not _INSTITUTIONAL_HEADER_LINE_RE.match(cand) and cand.casefold() not in ("the donor", "the donee", "donor", "donee"):
+                holder_name = cand
+    if not holder_name and is_id_card_page and card_holder_name:
+        holder_name = card_holder_name
+
+    # Check if clause explicitly mentions donor_name or donee_name
+    clause_cf = clause.casefold()
+    if not holder_name:
+        if donor_name and donor_name.casefold() in clause_cf:
+            holder_name = donor_name
+        elif donee_name and donee_name.casefold() in clause_cf:
+            holder_name = donee_name
+
+    # Resolve party_role: explicit clause marker > name match > active party block > unknown
+    name_role = _match_party_role_by_name(holder_name, donor_name, donee_name, witness_names)
+    if clause_role is not None:
+        party_role = clause_role
+    elif name_role != "Unknown":
+        party_role = name_role
+    elif active_block_role is not None:
+        party_role = active_block_role
+    else:
+        party_role = "Unknown"
+
+    if not holder_name:
+        if party_role == "Donor" and donor_name:
+            holder_name = donor_name
+        elif party_role == "Donee" and donee_name:
+            holder_name = donee_name
+
+    return party_role, holder_name
+
+
+def _deduplicate_id_records(raw_records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "pan_card": [],
+        "aadhaar_card": [],
+        "other_id": [],
+    }
+
+    def _merge_into(existing: dict[str, Any], incoming: dict[str, Any]) -> None:
+        existing["page_numbers"] = sorted(set(existing["page_numbers"]) | set(incoming["page_numbers"]))
+        # Prefer concrete id_number over None or [Aadhaar Redacted]
+        ex_id = existing.get("id_number")
+        in_id = incoming.get("id_number")
+        if in_id and (not ex_id or (ex_id == "[Aadhaar Redacted]" and in_id != "[Aadhaar Redacted]")):
+            existing["id_number"] = in_id
+        # Prefer non-empty / fuller holder_name
+        ex_name = existing.get("holder_name")
+        in_name = incoming.get("holder_name")
+        if in_name and (not ex_name or len(in_name) > len(ex_name)):
+            existing["holder_name"] = in_name
+        # Prefer known party_role over Unknown
+        if existing.get("party_role") == "Unknown" and incoming.get("party_role") != "Unknown":
+            existing["party_role"] = incoming["party_role"]
+        # Prefer full DOB over year/age
+        ex_dob = existing.get("dob_or_age")
+        in_dob = incoming.get("dob_or_age")
+        if in_dob and (not ex_dob or ("/" in in_dob and "/" not in ex_dob) or ("-" in in_dob and "-" not in ex_dob)):
+            existing["dob_or_age"] = in_dob
+        # Keep highest confidence
+        if _CONFIDENCE_RANK.get(incoming["confidence"], 0) > _CONFIDENCE_RANK.get(existing["confidence"], 0):
+            existing["confidence"] = incoming["confidence"]
+        # Combine short distinct snippets
+        in_ev = incoming.get("evidence_snippet") or ""
+        ex_ev = existing.get("evidence_snippet") or ""
+        if in_ev and in_ev not in ex_ev and len(ex_ev) < 200:
+            existing["evidence_snippet"] = f"{ex_ev} | {in_ev}"[:280] if ex_ev else in_ev[:280]
+
+    def _find_match(bucket: list[dict[str, Any]], cand: dict[str, Any]) -> dict[str, Any] | None:
+        c_num = cand.get("id_number")
+        c_sub = cand.get("id_sub_type")
+        c_name = " ".join(_name_tokens(cand.get("holder_name")))
+        c_role = cand.get("party_role")
+
+        for item in bucket:
+            e_num = item.get("id_number")
+            e_sub = item.get("id_sub_type")
+            e_name = " ".join(_name_tokens(item.get("holder_name")))
+            e_role = item.get("party_role")
+
+            if c_num and c_num != "[Aadhaar Redacted]" and e_num and e_num != "[Aadhaar Redacted]":
+                if cand["doc_type"] == "aadhaar_card":
+                    if c_num[-4:] == e_num[-4:]:
+                        return item
+                else:
+                    c_norm = re.sub(r"[\s/-]+", "", c_num).upper()
+                    e_norm = re.sub(r"[\s/-]+", "", e_num).upper()
+                    if c_norm == e_norm and (cand["doc_type"] != "other_id" or c_sub == e_sub):
+                        return item
+            else:
+                # One or both are redacted/unnumbered: match strictly when same holder or same explicit role without conflicting numbers
+                if c_name and e_name and c_name == e_name and (cand["doc_type"] != "other_id" or c_sub == e_sub):
+                    return item
+                if (
+                    c_role != "Unknown"
+                    and c_role == e_role
+                    and (not c_num or c_num == "[Aadhaar Redacted]" or not e_num or e_num == "[Aadhaar Redacted]")
+                    and (not c_name or not e_name or c_name == e_name)
+                    and (cand["doc_type"] != "other_id" or c_sub == e_sub)
+                ):
+                    return item
+        return None
+
+    for rec in raw_records:
+        bucket = grouped[rec["doc_type"]]
+        existing = _find_match(bucket, rec)
+        if existing is not None:
+            _merge_into(existing, rec)
+        else:
+            bucket.append(rec)
+
+    return _format_grouped_id_documents(
+        grouped["pan_card"],
+        grouped["aadhaar_card"],
+        grouped["other_id"],
+    )
+
+
+def _format_grouped_id_documents(
+    pan_list: list[dict[str, Any]],
+    aadhaar_list: list[dict[str, Any]],
+    other_list: list[dict[str, Any]],
+) -> dict[str, Any]:
+    total = len(pan_list) + len(aadhaar_list) + len(other_list)
+    if total == 0:
+        status = "not_found"
+    else:
+        all_items = [*pan_list, *aadhaar_list, *other_list]
+        has_definite = any(
+            (item.get("id_number") and item.get("id_number") != "[Aadhaar Redacted]")
+            or item.get("confidence") in ("high", "medium")
+            for item in all_items
+        )
+        status = "found" if has_definite else "uncertain"
+
+    return {
+        "status": status,
+        "summary_counts": {
+            "pan_card": len(pan_list),
+            "aadhaar_card": len(aadhaar_list),
+            "other_id": len(other_list),
+            "total": total,
+        },
+        "grouped_documents": {
+            "pan_card": pan_list,
+            "aadhaar_card": aadhaar_list,
+            "other_id": other_list,
+        },
+        "pan_card": pan_list,
+        "aadhaar_card": aadhaar_list,
+        "other_id": other_list,
+    }
+
+
+def extract_identification_documents(
+    pages: list[tuple[int, str]] | list[Page] | str,
+    donor_name: str | None = None,
+    donee_name: str | None = None,
+    all_pages: list[Page] | list[tuple[int, str]] | None = None,
+) -> dict[str, Any]:
+    """
+    Extract and deduplicate PAN, Aadhaar (masked/redacted), and Other ID documents
+    from Gift Deed party recitals and attached ID card pages.
+    Returns grouped records under grouped_documents and top-level category keys
+    alongside summary_counts and status ('found' | 'not_found' | 'uncertain').
+    """
+    norm_pages, id_card_pages = _normalize_id_pages(pages, all_pages=all_pages)
+    if not norm_pages:
+        return _format_grouped_id_documents([], [], [])
+
+    donor_name, donee_name, witness_names = _extract_party_names_from_pages(
+        norm_pages, donor_name=donor_name, donee_name=donee_name
+    )
+
+    known_party_names = [n for n in [donor_name, donee_name, *witness_names] if n]
+    raw_records: list[dict[str, Any]] = []
+
+    for page_num, page_text in norm_pages:
+        if not page_text.strip():
+            continue
+        is_id_card_page = page_num in id_card_pages
+        card_holder_name = _extract_cardholder_name(page_text, known_names=known_party_names) if is_id_card_page else None
+        card_dob = _extract_dob_or_age(page_text) if is_id_card_page else None
+
+        # On a dedicated ID card page with a single party cue, carry page-level role
+        page_role_hint: str | None = None
+        if is_id_card_page:
+            has_d = bool(re.search(r"\bdonor\b|दाता|देणार", page_text, re.IGNORECASE))
+            has_e = bool(re.search(r"\bdonee\b|प्राप्तकर्ता|घेणार|घेणारा", page_text, re.IGNORECASE))
+            has_w = bool(re.search(r"\bwitness\b|साक्षीदार|गवाह", page_text, re.IGNORECASE))
+            if sum((has_d, has_e, has_w)) == 1:
+                page_role_hint = "Donor" if has_d else ("Donee" if has_e else "Witness")
+
+        clauses = _split_multi_party_clauses(page_text, donor_name, donee_name)
+        active_block_role: str | None = page_role_hint
+
+        for clause in clauses:
+            # Update active party block role across consecutive lines (e.g. Donor:\nPAN: ...)
+            if not is_id_card_page and re.match(r"^\s*(?:schedule\s+of\s+property|property\s+schedule|whereas)\b", clause, re.IGNORECASE):
+                if not re.search(r"\b(?:donor|donee|witness)\b", clause, re.IGNORECASE):
+                    active_block_role = None
+            if re.search(r"^\s*(?:the\s+)?donor\s*[:：-]", clause, re.IGNORECASE):
+                active_block_role = "Donor"
+            elif re.search(r"^\s*(?:the\s+)?donee\s*[:：-]", clause, re.IGNORECASE):
+                active_block_role = "Donee"
+            elif re.search(r"^\s*(?:attesting\s+)?witness(?:\s*\d+)?\s*[:：-]", clause, re.IGNORECASE):
+                active_block_role = "Witness"
+
+            party_role, holder_name = _detect_clause_role_and_holder(
+                clause,
+                active_block_role=active_block_role,
+                donor_name=donor_name,
+                donee_name=donee_name,
+                witness_names=witness_names,
+                card_holder_name=card_holder_name,
+                is_id_card_page=is_id_card_page,
+            )
+            clause_dob = _extract_dob_or_age(clause) or (card_dob if is_id_card_page else None)
+            redacted_snippet = _redact_aadhaar_digits(re.sub(r"\s+", " ", clause).strip())[:240]
+            page_snippet = _redact_aadhaar_digits(re.sub(r"\s+", " ", page_text).strip())[:240]
+            used_tokens_in_clause: set[str] = set()
+
+            # 1. PAN Card extraction
+            pan_candidates: list[tuple[str, bool]] = []
+            for pm in _PAN_LABELED_RE.finditer(clause):
+                code = re.sub(r"\s+", "", pm.group(1)).upper()
+                if code not in used_tokens_in_clause:
+                    pan_candidates.append((code, True))
+                    used_tokens_in_clause.add(code)
+            for pm in _PAN_NUMBER_RE.finditer(clause):
+                code = pm.group(1).upper()
+                if code in used_tokens_in_clause:
+                    continue
+                prefix = clause[max(0, pm.start() - 40):pm.start()]
+                if _PAN_FALSE_PREFIX_RE.search(prefix):
+                    continue
+                has_pan_ctx = bool(
+                    re.search(r"\b(?:pan|permanent\s+account\s+number|income\s+tax)\b|पैन|पॅन|आयकर", clause, re.IGNORECASE)
+                    or re.search(r"\b(?:income\s+tax\s+department|permanent\s+account\s+number)\b", page_text, re.IGNORECASE)
+                )
+                pan_candidates.append((code, has_pan_ctx))
+                used_tokens_in_clause.add(code)
+
+            for pan_code, has_pan_ctx in pan_candidates:
+                raw_records.append(
+                    {
+                        "doc_type": "pan_card",
+                        "id_sub_type": "pan",
+                        "id_number": pan_code,
+                        "holder_name": holder_name,
+                        "party_role": party_role,
+                        "dob_or_age": clause_dob,
+                        "page_numbers": [page_num],
+                        "confidence": "high" if has_pan_ctx else "medium",
+                        "evidence_snippet": redacted_snippet,
+                    }
+                )
+
+            # 2. Aadhaar Card extraction (strictly masked/redacted)
+            has_aadhaar_ctx = bool(
+                _AADHAAR_CONTEXT_RE.search(clause) or (is_id_card_page and _AADHAAR_CONTEXT_RE.search(page_text))
+            )
+            aadhaar_found_in_clause = False
+            if has_aadhaar_ctx:
+                for am in _AADHAAR_RAW_RE.finditer(clause):
+                    s_pos, e_pos = am.span()
+                    before_ctx = clause[max(0, s_pos - 6):s_pos]
+                    after_ctx = clause[e_pos:min(len(clause), e_pos + 6)]
+                    if re.search(r"\d{4}[\s-]$", before_ctx) or re.match(r"^[\s-]\d{4}", after_ctx):
+                        continue
+                    prefix_ctx = clause[max(0, s_pos - 25):s_pos]
+                    if _AADHAAR_VID_LINE_RE.search(prefix_ctx) or re.search(r"\b(?:account|phone|mobile|mob|tel|challan)\s*(?:no\.?|number)?\s*[:#-]?\s*$", prefix_ctx, re.IGNORECASE):
+                        continue
+                    digits = re.sub(r"\D", "", am.group(1))
+                    if len(digits) == 12:
+                        masked_num = f"XXXX-XXXX-{digits[-4:]}"
+                        used_tokens_in_clause.add(digits)
+                        raw_records.append(
+                            {
+                                "doc_type": "aadhaar_card",
+                                "id_sub_type": "aadhaar",
+                                "id_number": masked_num,
+                                "holder_name": holder_name,
+                                "party_role": party_role,
+                                "dob_or_age": clause_dob,
+                                "page_numbers": [page_num],
+                                "confidence": "high",
+                                "evidence_snippet": redacted_snippet,
+                            }
+                        )
+                        aadhaar_found_in_clause = True
+
+                for mm in _AADHAAR_MASKED_RE.finditer(clause):
+                    last4 = mm.group(1) or mm.group(2)
+                    if last4:
+                        masked_num = f"XXXX-XXXX-{last4}"
+                        raw_records.append(
+                            {
+                                "doc_type": "aadhaar_card",
+                                "id_sub_type": "aadhaar",
+                                "id_number": masked_num,
+                                "holder_name": holder_name,
+                                "party_role": party_role,
+                                "dob_or_age": clause_dob,
+                                "page_numbers": [page_num],
+                                "confidence": "high",
+                                "evidence_snippet": redacted_snippet,
+                            }
+                        )
+                        aadhaar_found_in_clause = True
+
+                if not aadhaar_found_in_clause and _AADHAAR_CONTEXT_RE.search(clause) and (not is_id_card_page or "redacted" in clause.casefold()):
+                    # Aadhaar mentioned without readable digits (or explicitly redacted)
+                    raw_records.append(
+                        {
+                            "doc_type": "aadhaar_card",
+                            "id_sub_type": "aadhaar",
+                            "id_number": "[Aadhaar Redacted]",
+                            "holder_name": holder_name,
+                            "party_role": party_role,
+                            "dob_or_age": clause_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "medium" if (holder_name or "redacted" in clause.casefold()) else "low",
+                            "evidence_snippet": redacted_snippet,
+                        }
+                    )
+
+            # 3. Other IDs (Voter ID / EPIC, Passport, Driving Licence, Ration/Other)
+            # 3a. Driving Licence (match before Passport/Voter to avoid substring collisions)
+            has_dl_ctx = bool(_DL_CONTEXT_RE.search(clause) or (is_id_card_page and _DL_CONTEXT_RE.search(page_text)))
+            dl_found = False
+            if has_dl_ctx:
+                for dlm in list(_DL_LABELED_RE.finditer(clause)) + list(_DL_NUMBER_RE.finditer(clause)):
+                    dl_code = re.sub(r"\s+", "", dlm.group(1)).upper()
+                    if dl_code in used_tokens_in_clause:
+                        continue
+                    used_tokens_in_clause.add(dl_code)
+                    dl_found = True
+                    raw_records.append(
+                        {
+                            "doc_type": "other_id",
+                            "id_sub_type": "driving_licence",
+                            "id_number": dl_code,
+                            "holder_name": holder_name,
+                            "party_role": party_role,
+                            "dob_or_age": clause_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "high",
+                            "evidence_snippet": redacted_snippet,
+                        }
+                    )
+                if not dl_found and not is_id_card_page and _DL_CONTEXT_RE.search(clause):
+                    raw_records.append(
+                        {
+                            "doc_type": "other_id",
+                            "id_sub_type": "driving_licence",
+                            "id_number": None,
+                            "holder_name": holder_name,
+                            "party_role": party_role,
+                            "dob_or_age": clause_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "medium" if holder_name else "low",
+                            "evidence_snippet": redacted_snippet,
+                        }
+                    )
+
+            # 3b. Voter ID / EPIC
+            has_voter_ctx = bool(_VOTER_CONTEXT_RE.search(clause) or (is_id_card_page and _VOTER_CONTEXT_RE.search(page_text)))
+            voter_found = False
+            if has_voter_ctx:
+                for vm in list(_VOTER_LABELED_RE.finditer(clause)) + list(_VOTER_NUMBER_RE.finditer(clause)):
+                    v_code = re.sub(r"\s+", "", vm.group(1)).upper()
+                    if v_code in used_tokens_in_clause:
+                        continue
+                    used_tokens_in_clause.add(v_code)
+                    voter_found = True
+                    raw_records.append(
+                        {
+                            "doc_type": "other_id",
+                            "id_sub_type": "voter_id",
+                            "id_number": v_code,
+                            "holder_name": holder_name,
+                            "party_role": party_role,
+                            "dob_or_age": clause_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "high",
+                            "evidence_snippet": redacted_snippet,
+                        }
+                    )
+                if not voter_found and not is_id_card_page and _VOTER_CONTEXT_RE.search(clause):
+                    raw_records.append(
+                        {
+                            "doc_type": "other_id",
+                            "id_sub_type": "voter_id",
+                            "id_number": None,
+                            "holder_name": holder_name,
+                            "party_role": party_role,
+                            "dob_or_age": clause_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "medium" if holder_name else "low",
+                            "evidence_snippet": redacted_snippet,
+                        }
+                    )
+
+            # 3c. Passport
+            has_passport_ctx = bool(_PASSPORT_CONTEXT_RE.search(clause) or (is_id_card_page and _PASSPORT_CONTEXT_RE.search(page_text)))
+            passport_found = False
+            if has_passport_ctx:
+                for ppm in list(_PASSPORT_LABELED_RE.finditer(clause)) + list(_PASSPORT_NUMBER_RE.finditer(clause)):
+                    p_code = ppm.group(1).upper()
+                    if p_code in used_tokens_in_clause or any(p_code in tok for tok in used_tokens_in_clause):
+                        continue
+                    used_tokens_in_clause.add(p_code)
+                    passport_found = True
+                    raw_records.append(
+                        {
+                            "doc_type": "other_id",
+                            "id_sub_type": "passport",
+                            "id_number": p_code,
+                            "holder_name": holder_name,
+                            "party_role": party_role,
+                            "dob_or_age": clause_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "high",
+                            "evidence_snippet": redacted_snippet,
+                        }
+                    )
+                if not passport_found and not is_id_card_page and _PASSPORT_CONTEXT_RE.search(clause):
+                    raw_records.append(
+                        {
+                            "doc_type": "other_id",
+                            "id_sub_type": "passport",
+                            "id_number": None,
+                            "holder_name": holder_name,
+                            "party_role": party_role,
+                            "dob_or_age": clause_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "medium" if holder_name else "low",
+                            "evidence_snippet": redacted_snippet,
+                        }
+                    )
+
+            # 3d. Generic Govt / Ration / OCI ID
+            for om in _OTHER_GOVT_ID_LABELED_RE.finditer(clause):
+                o_code = re.sub(r"\s+", "", om.group(3)).upper()
+                if o_code in used_tokens_in_clause:
+                    continue
+                sub = "ration_card" if om.group(1) else ("oci_card" if om.group(2) else "other_government_id")
+                used_tokens_in_clause.add(o_code)
+                raw_records.append(
+                    {
+                        "doc_type": "other_id",
+                        "id_sub_type": sub,
+                        "id_number": o_code,
+                        "holder_name": holder_name,
+                        "party_role": party_role,
+                        "dob_or_age": clause_dob,
+                        "page_numbers": [page_num],
+                        "confidence": "medium",
+                        "evidence_snippet": redacted_snippet,
+                    }
+                )
+
+        # Attached ID card header pages with no extracted ID number anywhere on the page
+        if is_id_card_page:
+            card_role = page_role_hint or _match_party_role_by_name(card_holder_name, donor_name, donee_name, witness_names)
+            if re.search(r"\b(?:income\s+tax\s+department|permanent\s+account\s+number)\b|आयकर\s+विभाग", page_text, re.IGNORECASE):
+                if not any(r["doc_type"] == "pan_card" and page_num in r["page_numbers"] for r in raw_records):
+                    raw_records.append(
+                        {
+                            "doc_type": "pan_card",
+                            "id_sub_type": "pan",
+                            "id_number": None,
+                            "holder_name": card_holder_name,
+                            "party_role": card_role,
+                            "dob_or_age": card_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "medium" if card_holder_name else "low",
+                            "evidence_snippet": page_snippet,
+                        }
+                    )
+            if _AADHAAR_CONTEXT_RE.search(page_text):
+                if not any(r["doc_type"] == "aadhaar_card" and page_num in r["page_numbers"] for r in raw_records):
+                    raw_records.append(
+                        {
+                            "doc_type": "aadhaar_card",
+                            "id_sub_type": "aadhaar",
+                            "id_number": "[Aadhaar Redacted]",
+                            "holder_name": card_holder_name,
+                            "party_role": card_role,
+                            "dob_or_age": card_dob,
+                            "page_numbers": [page_num],
+                            "confidence": "medium" if card_holder_name else "low",
+                            "evidence_snippet": page_snippet,
+                        }
+                    )
+
+    return _deduplicate_id_records(raw_records)
+
+
 def assess_stamp_duty_article_34(
     document: LogicalDocument,
     text_by_page: list[tuple[int, str]],
@@ -2064,65 +2988,9 @@ def assess_stamp_duty_article_34(
                     txt = p.ocr_text_corrected or p.ocr_text_original or p.digital_text or ""
                     if txt:
                         pages_to_scan.append((p.page_number, txt))
-
-        for page_num, text in pages_to_scan:
-            # 1. Recital between clauses: "Between <Donor Name> (Donor) and <Donee Name> (Donee)"
-            if donor_name is None or donee_name is None:
-                for b_pat, is_donor_first in RECITALS_BETWEEN_PARTY_PATTERNS:
-                    b_match = b_pat.search(text)
-                    if b_match:
-                        cand_a = _clean_extracted_name(b_match.group(1))
-                        cand_b = _clean_extracted_name(b_match.group(2))
-                        if is_donor_first:
-                            if donor_name is None and cand_a:
-                                donor_name = cand_a
-                            if donee_name is None and cand_b:
-                                donee_name = cand_b
-                        else:
-                            if donee_name is None and cand_a:
-                                donee_name = cand_a
-                            if donor_name is None and cand_b:
-                                donor_name = cand_b
-                    if donor_name is not None and donee_name is not None:
-                        break
-
-            # 2. Recital "donor <Name> gifts/conveys to donee <Name>"
-            if donor_name is None or donee_name is None:
-                recital_m = re.search(
-                    r"\b(?:donor|दाता|देणार)\s+([A-Za-z\u0900-\u097F\s.'-]{3,60})\s+(?:is\s+gifting|gifts|gifting|conveys|conveying|transfers|transferring|has\s+gifted)\s+(?:property\s+)?(?:to\s+)?(?:donee\s+)?([A-Za-z\u0900-\u097F\s.'-]{3,60})",
-                    text,
-                    re.IGNORECASE,
-                )
-                if recital_m:
-                    d_c = _clean_extracted_name(recital_m.group(1))
-                    e_c = _clean_extracted_name(recital_m.group(2))
-                    if donor_name is None and d_c:
-                        donor_name = d_c
-                    if donee_name is None and e_c:
-                        donee_name = e_c
-
-            # 3. Labeled lines (using extract_fields regex)
-            if donor_name is None or donee_name is None:
-                for line in text.splitlines():
-                    match = re.search(
-                        r"(donor\s*/\s*दाता|donee\s*/\s*प्राप्तकर्ता|देणार(?:\s*/\s*दाता)?|घेणार(?:\s*/\s*प्राप्तकर्ता)?|donor|donee|दाता|देणार|घेणारा?|प्राप्तकर्ता|transferor|recipient|owner|party|श्री|श्रीमती)\s*[:：.-]\s*([\w .'-]{3,100})",
-                        line,
-                        re.IGNORECASE,
-                    )
-                    if match:
-                        label = match.group(1).casefold().split("/", 1)[0].strip()
-                        raw_val = match.group(2)
-                        cand = _clean_extracted_name(raw_val)
-                        if cand:
-                            if label in ("donor", "दाता", "देणार") and donor_name is None:
-                                donor_name = cand
-                            elif label in ("donee", "प्राप्तकर्ता", "घेणार", "घेणारा") and donee_name is None:
-                                donee_name = cand
-                    if donor_name is not None and donee_name is not None:
-                        break
-
-            if donor_name is not None and donee_name is not None:
-                break
+        donor_name, donee_name, _ = _extract_party_names_from_pages(
+            pages_to_scan, donor_name=donor_name, donee_name=donee_name
+        )
 
     rel_res = evaluate_article_34_relationship(
         text_by_page, donor_name=donor_name, donee_name=donee_name
@@ -2437,6 +3305,13 @@ def assess_stamp_duty_article_34(
     )
     calc_components["surname_mismatch"] = has_surname_mismatch
 
+    id_docs = extract_identification_documents(
+        text_by_page,
+        donor_name=donor_name,
+        donee_name=donee_name,
+        all_pages=all_pages,
+    )
+
     source_evidence_dict = {
         "directional_relationship": {
             "donor_role": donor_role,
@@ -2502,6 +3377,7 @@ def assess_stamp_duty_article_34(
     assessment.effective_date = STAMP_DUTY_EFFECTIVE_FROM
     assessment.calculation_components = json.dumps(calc_components)
     assessment.source_evidence = json.dumps(source_evidence_dict)
+    assessment.identification_documents = json.dumps(id_docs, ensure_ascii=False)
     assessment.market_value = mv
     assessment.base_duty = base_duty
     assessment.metro_cess_rate = metro_cess_rate

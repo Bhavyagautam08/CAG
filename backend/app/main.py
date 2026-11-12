@@ -154,6 +154,9 @@ class StampDutyAssessmentResponse(BaseModel):
     effective_date: str | None = "2017-05-16"
     calculation_components: Any = None
     source_evidence: Any = None
+    identification_documents: dict[str, Any] = Field(
+        default_factory=lambda: _parse_identification_documents(None)
+    )
     market_value: int | None = None
     base_stamp_duty: int | None = None
     metro_cess_rate: float | None = None
@@ -781,6 +784,59 @@ def reprocess_ingestion_fields(ingestion_id: str, db: Session = Depends(get_db))
     return {"id": ingestion_id, "status": ingestion.status, **summary}
 
 
+def _parse_identification_documents(raw: Any) -> dict[str, Any]:
+    empty_grouped: dict[str, list[dict[str, Any]]] = {"pan_card": [], "aadhaar_card": [], "other_id": []}
+    data: Any = raw
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        return {
+            "status": "not_found",
+            "summary_counts": {"pan_card": 0, "aadhaar_card": 0, "other_id": 0, "total": 0},
+            "grouped_documents": empty_grouped,
+            "pan_card": [],
+            "aadhaar_card": [],
+            "other_id": [],
+        }
+    grouped_src = data.get("grouped_documents") if isinstance(data.get("grouped_documents"), dict) else data
+    pan_list = list(grouped_src.get("pan_card") or data.get("pan_card") or [])
+    aadhaar_list = list(grouped_src.get("aadhaar_card") or data.get("aadhaar_card") or [])
+    other_list = list(grouped_src.get("other_id") or data.get("other_id") or [])
+    total = len(pan_list) + len(aadhaar_list) + len(other_list)
+    status = data.get("status")
+    if status not in ("found", "not_found", "uncertain"):
+        if total == 0:
+            status = "not_found"
+        else:
+            all_items = [*pan_list, *aadhaar_list, *other_list]
+            has_definite = any(
+                (item.get("id_number") and item.get("id_number") != "[Aadhaar Redacted]")
+                or item.get("confidence") in ("high", "medium")
+                for item in all_items
+            )
+            status = "found" if has_definite else "uncertain"
+    return {
+        "status": status,
+        "summary_counts": {
+            "pan_card": len(pan_list),
+            "aadhaar_card": len(aadhaar_list),
+            "other_id": len(other_list),
+            "total": total,
+        },
+        "grouped_documents": {
+            "pan_card": pan_list,
+            "aadhaar_card": aadhaar_list,
+            "other_id": other_list,
+        },
+        "pan_card": pan_list,
+        "aadhaar_card": aadhaar_list,
+        "other_id": other_list,
+    }
+
+
 def _serialize_stamp_duty_assessment(assessment: StampDutyAssessment | None) -> dict | None:
     if not assessment:
         return None
@@ -841,6 +897,7 @@ def _serialize_stamp_duty_assessment(assessment: StampDutyAssessment | None) -> 
         "effective_date": assessment.effective_date or "2017-05-16",
         "calculation_components": calc_components,
         "source_evidence": source_ev,
+        "identification_documents": _parse_identification_documents(getattr(assessment, "identification_documents", None)),
         "market_value": assessment.market_value,
         "base_stamp_duty": assessment.base_duty,
         "metro_cess_rate": assessment.metro_cess_rate,
@@ -1101,6 +1158,7 @@ def recalculate_and_sync_stamp_duty_assessment(
 
 
 def _doc_dict(row: LogicalDocument):
+    serialized_assessment = _serialize_stamp_duty_assessment(getattr(row, "stamp_duty_assessment", None))
     return {
         "id": row.id,
         "ingestion_id": row.ingestion_id,
@@ -1116,7 +1174,12 @@ def _doc_dict(row: LogicalDocument):
         "case_link_status": row.case_link_status,
         "case_link_evidence": row.case_link_evidence,
         "fields": [_field_dict(field) for field in row.fields],
-        "stamp_duty_assessment": _serialize_stamp_duty_assessment(getattr(row, "stamp_duty_assessment", None)),
+        "stamp_duty_assessment": serialized_assessment,
+        "identification_documents": (
+            serialized_assessment["identification_documents"]
+            if serialized_assessment
+            else _parse_identification_documents(None)
+        ),
     }
 
 
@@ -1619,7 +1682,12 @@ def correct_field(field_id: str, payload: FieldCorrection, db: Session = Depends
 
 @app.get("/api/cases")
 def list_cases(db: Session = Depends(get_db)):
-    rows = db.scalars(select(CaseRecord).options(selectinload(CaseRecord.documents).selectinload(LogicalDocument.fields))).all()
+    rows = db.scalars(
+        select(CaseRecord).options(
+            selectinload(CaseRecord.documents).selectinload(LogicalDocument.fields),
+            selectinload(CaseRecord.documents).selectinload(LogicalDocument.stamp_duty_assessment),
+        )
+    ).all()
     return [
         {
             "id": row.id,
@@ -1636,7 +1704,14 @@ def list_cases(db: Session = Depends(get_db)):
 
 @app.get("/api/cases/{case_id}/report")
 def case_report(case_id: str, format: Literal["json", "csv"] = "json", db: Session = Depends(get_db)):
-    case = db.scalar(select(CaseRecord).options(selectinload(CaseRecord.documents).selectinload(LogicalDocument.fields)).where(CaseRecord.id == case_id))
+    case = db.scalar(
+        select(CaseRecord)
+        .options(
+            selectinload(CaseRecord.documents).selectinload(LogicalDocument.fields),
+            selectinload(CaseRecord.documents).selectinload(LogicalDocument.stamp_duty_assessment),
+        )
+        .where(CaseRecord.id == case_id)
+    )
     if not case:
         raise HTTPException(404, "Case not found.")
     findings = db.scalars(select(ValidationFinding).where(ValidationFinding.case_id == case.id)).all()

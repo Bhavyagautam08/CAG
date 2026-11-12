@@ -23,6 +23,7 @@ from backend.app.processing import (
     evaluate_article_34_relationship,
     extract_directional_relationship,
     extract_fields,
+    extract_identification_documents,
     extract_market_value,
     extract_property_schedule,
     extract_stamp_duty_paid,
@@ -2571,6 +2572,209 @@ def test_child_to_parent_end_to_end_assessment_requires_3_percent_duty():
     assert assess.total_stamp_duty_paid == 200000
     assert assess.difference == 0
     assert assess.status == "compliant"
+
+
+def test_extract_identification_documents_inline_recitals_and_grouping():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Between Ramesh Kulkarni, aged 65 years, holding PAN ABCDE1234F and Aadhaar No. 2345 6789 0123 (Donor) "
+            "and Priya Sharma, aged 32 years, holding PAN XYZAB5678C and Passport No. Z1234567 (Donee).\n"
+            "Witness 1: Mohan Patil, Age 50, Voter ID: MHX1234567, Driving Licence No. MH12 20100012345.",
+        )
+    ]
+    grouped = extract_identification_documents(pages)
+    assert set(grouped["grouped_documents"].keys()) == {"pan_card", "aadhaar_card", "other_id"}
+    assert grouped["status"] == "found"
+    assert grouped["summary_counts"] == {"pan_card": 2, "aadhaar_card": 1, "other_id": 3, "total": 6}
+
+    # PAN cards
+    assert len(grouped["pan_card"]) == 2
+    pans_by_num = {item["id_number"]: item for item in grouped["pan_card"]}
+    assert pans_by_num["ABCDE1234F"]["party_role"] == "Donor"
+    assert pans_by_num["ABCDE1234F"]["holder_name"] == "Ramesh Kulkarni"
+    assert pans_by_num["ABCDE1234F"]["dob_or_age"] == "65 years"
+    assert pans_by_num["ABCDE1234F"]["page_numbers"] == [1]
+    assert pans_by_num["ABCDE1234F"]["confidence"] == "high"
+    assert pans_by_num["XYZAB5678C"]["party_role"] == "Donee"
+    assert pans_by_num["XYZAB5678C"]["holder_name"] == "Priya Sharma"
+
+    # Aadhaar masked both in id_number and evidence_snippet
+    assert len(grouped["aadhaar_card"]) == 1
+    aadhaar = grouped["aadhaar_card"][0]
+    assert aadhaar["doc_type"] == "aadhaar_card"
+    assert aadhaar["id_sub_type"] == "aadhaar"
+    assert aadhaar["id_number"] == "XXXX-XXXX-0123"
+    assert "2345 6789 0123" not in aadhaar["evidence_snippet"]
+    assert "XXXX-XXXX-0123" in aadhaar["evidence_snippet"]
+    assert aadhaar["party_role"] == "Donor"
+    assert aadhaar["holder_name"] == "Ramesh Kulkarni"
+
+    # Other IDs: Passport (Donee) + Voter ID & Driving Licence (Witness)
+    assert len(grouped["other_id"]) == 3
+    others_by_sub = {item["id_sub_type"]: item for item in grouped["other_id"]}
+    assert others_by_sub["passport"]["id_number"] == "Z1234567"
+    assert others_by_sub["passport"]["party_role"] == "Donee"
+    assert others_by_sub["voter_id"]["id_number"] == "MHX1234567"
+    assert others_by_sub["voter_id"]["party_role"] == "Witness"
+    assert others_by_sub["driving_licence"]["id_number"] == "MH1220100012345"
+    assert others_by_sub["driving_licence"]["party_role"] == "Witness"
+
+    expected_keys = {
+        "doc_type",
+        "id_sub_type",
+        "id_number",
+        "holder_name",
+        "party_role",
+        "dob_or_age",
+        "page_numbers",
+        "confidence",
+        "evidence_snippet",
+    }
+    for bucket in grouped["grouped_documents"].values():
+        for item in bucket:
+            assert set(item.keys()) == expected_keys
+
+
+def test_extract_identification_documents_attached_id_cards_and_role_inference():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Govind Kulkarni\n"
+            "Donee: Suresh Ramesh Kulkarni\n"
+            "WHEREAS the Donor gifts the residential flat to his son the Donee.",
+        ),
+        (
+            2,
+            "INCOME TAX DEPARTMENT\n"
+            "GOVT. OF INDIA\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "RAMESH GOVIND KULKARNI\n"
+            "Father's Name\n"
+            "GOVIND NARAYAN KULKARNI\n"
+            "Date of Birth\n"
+            "10/05/1960",
+        ),
+        (
+            3,
+            "Government of India\n"
+            "Unique Identification Authority of India\n"
+            "Suresh Ramesh Kulkarni\n"
+            "Year of Birth: 1992\n"
+            "Male\n"
+            "4567 8901 2345\n"
+            "VID : 9123 4567 8901 2345",
+        ),
+        (
+            4,
+            "ELECTION COMMISSION OF INDIA\n"
+            "Elector Photo Identity Card\n"
+            "Name: M. Kulkarni\n"
+            "EPIC No: MHX9988776\n"
+            "Age: 55",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+
+    assert len(grouped["pan_card"]) == 1
+    pan = grouped["pan_card"][0]
+    assert pan["id_number"] == "ABCDE1234F"
+    assert pan["holder_name"] == "RAMESH GOVIND KULKARNI"
+    assert pan["party_role"] == "Donor"
+    assert pan["dob_or_age"] == "10/05/1960"
+    assert pan["page_numbers"] == [2]
+
+    # Must extract 12-digit Aadhaar (XXXX-XXXX-2345) and NOT misparse 16-digit VID
+    assert len(grouped["aadhaar_card"]) == 1
+    aadhaar = grouped["aadhaar_card"][0]
+    assert aadhaar["id_number"] == "XXXX-XXXX-2345"
+    assert aadhaar["holder_name"] == "Suresh Ramesh Kulkarni"
+    assert aadhaar["party_role"] == "Donee"
+    assert aadhaar["dob_or_age"] == "1992"
+    assert aadhaar["page_numbers"] == [3]
+
+    # Shared surname alone ("M. Kulkarni") must NOT guess Donor or Donee
+    assert len(grouped["other_id"]) == 1
+    epic = grouped["other_id"][0]
+    assert epic["id_sub_type"] == "voter_id"
+    assert epic["id_number"] == "MHX9988776"
+    assert epic["party_role"] == "Unknown"
+
+
+def test_extract_identification_documents_deduplication_across_pages():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Kulkarni, aged 65, PAN: ABCDE1234F, Aadhaar: [Aadhaar Redacted].\n"
+            "Donee: Sunita Kulkarni, Aadhaar No: 7788 9900 1122.",
+        ),
+        (
+            3,
+            "INCOME TAX DEPARTMENT\n"
+            "Permanent Account Number\n"
+            "Name: RAMESH KULKARNI\n"
+            "DOB: 10/05/1960\n"
+            "ABCDE1234F",
+        ),
+        (
+            4,
+            "Unique Identification Authority of India\n"
+            "Ramesh Kulkarni\n"
+            "Aadhaar: 2345 6789 0123\n"
+            "DOB: 10/05/1960",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+
+    # Same PAN on page 1 and page 3 -> deduplicated into 1 record with page_numbers [1, 3] and enriched DOB
+    assert len(grouped["pan_card"]) == 1
+    pan = grouped["pan_card"][0]
+    assert pan["id_number"] == "ABCDE1234F"
+    assert pan["page_numbers"] == [1, 3]
+    assert pan["party_role"] == "Donor"
+    assert pan["dob_or_age"] == "10/05/1960"
+
+    # Donor's redacted Aadhaar on page 1 merges with Donor's numbered Aadhaar on page 4,
+    # while Donee's Aadhaar on page 1 stays distinct.
+    assert len(grouped["aadhaar_card"]) == 2
+    by_role = {item["party_role"]: item for item in grouped["aadhaar_card"]}
+    assert by_role["Donor"]["id_number"] == "XXXX-XXXX-0123"
+    assert by_role["Donor"]["page_numbers"] == [1, 4]
+    assert by_role["Donee"]["id_number"] == "XXXX-XXXX-1122"
+    assert by_role["Donee"]["page_numbers"] == [1]
+
+
+def test_assess_stamp_duty_persists_identification_documents():
+    import json as _json
+
+    doc = LogicalDocument(id="doc-id-persist", ingestion_id="ing-id-persist", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Kulkarni, aged 64, PAN: ABCDE1234F\n"
+            "Donee: Suresh Kulkarni, aged 32, Aadhaar No: 3456 7890 1234\n"
+            "WHEREAS the Donor is the father of the Donee.\n"
+            "Schedule of Property: Residential flat No. 10, Pune.\n"
+            "Market Value: ₹ 30,00,000/-\n"
+            "Total Stamp Duty Paid: ₹ 30,200/-",
+        )
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.identification_documents is not None
+    parsed = _json.loads(assess.identification_documents)
+    assert len(parsed["pan_card"]) == 1
+    assert parsed["pan_card"][0]["id_number"] == "ABCDE1234F"
+    assert parsed["pan_card"][0]["party_role"] == "Donor"
+    assert len(parsed["aadhaar_card"]) == 1
+    assert parsed["aadhaar_card"][0]["id_number"] == "XXXX-XXXX-1234"
+    assert parsed["aadhaar_card"][0]["party_role"] == "Donee"
+
 
 
 
