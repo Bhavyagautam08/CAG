@@ -21,6 +21,7 @@ from .config import get_settings
 from .models import Ingestion, LogicalDocument, Page, StampDutyAssessment
 from .ocr import detect_table_lines
 from .pdf_utils import LocalImageBundle
+from .processing import ensure_fresh_identification_documents
 
 logger = logging.getLogger(__name__)
 
@@ -1090,6 +1091,7 @@ def build_ingestion_report(db: Session, ingestion_id: str) -> bytes:
         .where(LogicalDocument.ingestion_id == ingestion_id)
         .order_by(LogicalDocument.start_page)
     ).all()
+    ensure_fresh_identification_documents(db, list(documents))
     pages = db.scalars(
         select(Page)
         .where(Page.ingestion_id == ingestion_id)

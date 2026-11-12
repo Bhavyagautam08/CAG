@@ -56,6 +56,7 @@ from .pdf_utils import LocalImageBundle, LocalPdf
 from .pdf_report import IngestionNotCompleteError, SourceChangedError, build_ingestion_report
 from .processing import (
     RelationshipEligibility,
+    ensure_fresh_identification_documents,
     evaluate_article_34_relationship,
     parse_indian_currency_amount,
     process_ingestion,
@@ -1238,6 +1239,7 @@ def list_documents(
         .limit(page_size)
     )
     rows = db.scalars(stmt).all()
+    ensure_fresh_identification_documents(db, list(rows))
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     return {"items": [_doc_dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
 
@@ -1251,6 +1253,7 @@ def document_detail(document_id: str, db: Session = Depends(get_db)):
     )
     if not row:
         raise HTTPException(404, "Document not found.")
+    ensure_fresh_identification_documents(db, [row])
     pages = db.scalars(select(Page).where(Page.ingestion_id == row.ingestion_id, Page.page_number >= row.start_page, Page.page_number <= row.end_page).order_by(Page.page_number)).all()
     findings = db.scalars(
         select(ValidationFinding)
@@ -1513,6 +1516,7 @@ def update_stamp_duty_assessment(
         old_status,
         assessment.status,
     )
+    ensure_fresh_identification_documents(db, [doc], commit=False)
     db.commit()
     db.refresh(assessment)
     return _serialize_stamp_duty_assessment(assessment)
@@ -1688,6 +1692,7 @@ def list_cases(db: Session = Depends(get_db)):
             selectinload(CaseRecord.documents).selectinload(LogicalDocument.stamp_duty_assessment),
         )
     ).all()
+    ensure_fresh_identification_documents(db, [doc for row in rows for doc in row.documents])
     return [
         {
             "id": row.id,
@@ -1714,6 +1719,7 @@ def case_report(case_id: str, format: Literal["json", "csv"] = "json", db: Sessi
     )
     if not case:
         raise HTTPException(404, "Case not found.")
+    ensure_fresh_identification_documents(db, list(case.documents))
     findings = db.scalars(select(ValidationFinding).where(ValidationFinding.case_id == case.id)).all()
     report = {
         "case": {

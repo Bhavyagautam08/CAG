@@ -2776,6 +2776,104 @@ def test_assess_stamp_duty_persists_identification_documents():
     assert parsed["aadhaar_card"][0]["party_role"] == "Donee"
 
 
+def test_extract_identification_documents_handles_multiline_ocr_noise_and_witness_transliteration():
+    pages = [
+        (
+            3,
+            "GIFT DEED\n"
+            "BETWEEN:\n"
+            "MR. CHETAN AMICHAND SHAH, [PAN # AAEPS2095R], [AADHAR\n"
+            "# 8161 9641 4794], age 75 years, residing at Mumbai,\n"
+            'hereinafter referred to as "THE DONOR" of the ONE PART;\n'
+            "AND\n"
+            "MRS. SHEELA CHETAN SHAH, [PAN # AAMPS4553J[, [AADHAR #\n"
+            "5598 7473 7252], age 71 years, residing at Mumbai,\n"
+            'hereinafter referred to as "THE DONEE" of the OTHER PART.',
+        ),
+        (
+            6,
+            "INDIAN INCOME TAX RETURN ACKNOWLEDGEMENT\n"
+            "PAN AAMPS4553J\n"
+            "Name SHEELA CHETAN SHAH\n"
+            "and verified by SHEELA CHETAN SHAH having PAN AAMPS4553J on 14-Aug-2025\n"
+            "using paper ITR-Verification Form /Electronic Verification Code EGRLSFU3RI generated through Aadhaar\n"
+            "oTp mode",
+        ),
+        (
+            8,
+            "भारत सरकार\n"
+            "Chetan Amichand Shah\n"
+            "जन्म तारीख / 008: 31/08/1950\n"
+            "8161 9641 4794\n"
+            "आधार UNOUE IDENTIFICATION AUTHORITY OF INDTA\n"
+            "8161.9641 4794 m",
+        ),
+        (
+            9,
+            "PERMANENT ACCOUNT NUMBER\n"
+            "AAMPS4553J\n"
+            "वाम 1NAME\n"
+            "SHEELA CHETAN SHAH\n"
+            "जय लिंन OATE OP SIRTH\n"
+            "21-06-1954",
+        ),
+        (
+            11,
+            "AADHAAR\n"
+            "Downtnad Date: 1903/20181\n"
+            "Hemanshu Ganvantohai Darii w To establish identity authenticate online,\n"
+            "आसपला .x क्रम्मांक/Your . No.:\n"
+            "5442 7001 7288\n"
+            "माझे आधार, माझ ओळख\n"
+            "Remanshy Gunvantbhai Dani\n"
+            "जन्म४नेल/009: MALE 23/08/1987",
+        ),
+        (
+            12,
+            "भारते सरकार\n"
+            "6157 6949 4296\n"
+            "सामान्य माणसाया अधिकार\n"
+            "Unique 22 7844 tdentibcabon 101 2640 Authosty of vndia\n"
+            "6157 6949 4296",
+        ),
+        (
+            14,
+            "दस्त गोषवारा भाग-2\n"
+            "नाव:शीला चेतन शाह लिहन ऐेणार\n"
+            "2 नाव चेतन अमिचंद शाह लिहन देणार\n"
+            "ओळख:-\n"
+            "1 लात:संजय शिवगण\n"
+            "2 नाव:हिमांश दर्जी",
+        ),
+    ]
+    doc_pages = [pages[0]]
+    grouped = extract_identification_documents(doc_pages, all_pages=pages)
+
+    pans = {item["id_number"]: item for item in grouped["pan_card"]}
+    assert set(pans.keys()) == {"AAEPS2095R", "AAMPS4553J"}
+    assert pans["AAEPS2095R"]["party_role"] == "Donor"
+    assert pans["AAEPS2095R"]["holder_name"] == "CHETAN AMICHAND SHAH"
+    assert pans["AAMPS4553J"]["party_role"] == "Donee"
+    assert pans["AAMPS4553J"]["holder_name"] == "SHEELA CHETAN SHAH"
+    assert pans["AAMPS4553J"]["dob_or_age"] == "21-06-1954"
+
+    aadhaars = {item["id_number"]: item for item in grouped["aadhaar_card"]}
+    assert "[Aadhaar Redacted]" not in aadhaars  # Must NOT false-trigger from ITR-V EVC line
+    assert set(aadhaars.keys()) == {
+        "XXXX-XXXX-4794",
+        "XXXX-XXXX-7252",
+        "XXXX-XXXX-7288",
+        "XXXX-XXXX-4296",
+    }
+    assert aadhaars["XXXX-XXXX-4794"]["party_role"] == "Donor"
+    assert aadhaars["XXXX-XXXX-4794"]["dob_or_age"] == "31/08/1950"
+    assert aadhaars["XXXX-XXXX-7252"]["party_role"] == "Donee"
+    assert aadhaars["XXXX-XXXX-7288"]["party_role"] == "Witness"
+    assert aadhaars["XXXX-XXXX-7288"]["holder_name"] == "Hemanshu Ganvantohai Darii"
+    assert aadhaars["XXXX-XXXX-7288"]["dob_or_age"] == "23/08/1987"
+    assert aadhaars["XXXX-XXXX-4296"]["holder_name"] is None
+
+
 
 
 

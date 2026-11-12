@@ -1386,3 +1386,67 @@ def test_identification_documents_legacy_null_fallback_in_api():
     assert patch_resp.json()["identification_documents"] == expected_empty
 
     client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_identification_documents_auto_recomputes_when_extractor_version_outdated():
+    page_1 = (
+        "GIFT DEED\n"
+        "BETWEEN:\n"
+        "MR. CHETAN AMICHAND SHAH, [PAN # AAEPS2095R], [AADHAR\n"
+        "# 8161 9641 4794], age 75 years,\n"
+        'hereinafter referred to as "THE DONOR";\n'
+        "AND\n"
+        "MRS. SHEELA CHETAN SHAH, [PAN # AAMPS4553J[, [AADHAR #\n"
+        "5598 7473 7252], age 71 years,\n"
+        'hereinafter referred to as "THE DONEE".\n'
+        "WHEREAS Donor gifts the flat to his wife Donee.\n"
+        "Schedule of Property: Flat 19A, Mumbai Municipal Corporation.\n"
+        "Market Value: Rs. 50,00,000/-\n"
+        "Total Stamp Duty Paid: Rs. 200/-"
+    )
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("stale_id_recompute.pdf", pdf_bytes([page_1]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+
+    from backend.app.models import StampDutyAssessment
+    from backend.app.processing import ID_EXTRACTOR_VERSION
+
+    # Simulate an older DB record from an outdated extractor_version
+    stale_payload = {
+        "extractor_version": "outdated-v0",
+        "status": "not_found",
+        "summary_counts": {"pan_card": 0, "aadhaar_card": 0, "other_id": 0, "total": 0},
+        "grouped_documents": {"pan_card": [], "aadhaar_card": [], "other_id": []},
+        "pan_card": [],
+        "aadhaar_card": [],
+        "other_id": [],
+    }
+    with SessionLocal() as db:
+        assessment = db.query(StampDutyAssessment).filter_by(document_id=gift_doc["id"]).one()
+        assessment.identification_documents = json.dumps(stale_payload)
+        db.commit()
+
+    detail_resp = client.get(f"/api/documents/{gift_doc['id']}")
+    assert detail_resp.status_code == 200
+    id_docs = detail_resp.json()["identification_documents"]
+    assert id_docs["status"] == "found"
+    assert id_docs["summary_counts"] == {"pan_card": 2, "aadhaar_card": 2, "other_id": 0, "total": 4}
+    assert {p["id_number"]: p["party_role"] for p in id_docs["pan_card"]} == {
+        "AAEPS2095R": "Donor",
+        "AAMPS4553J": "Donee",
+    }
+
+    with SessionLocal() as db:
+        refreshed = db.query(StampDutyAssessment).filter_by(document_id=gift_doc["id"]).one()
+        persisted = json.loads(refreshed.identification_documents)
+        assert persisted["extractor_version"] == ID_EXTRACTOR_VERSION
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
