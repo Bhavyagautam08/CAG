@@ -16,7 +16,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pypdf.errors import PdfReadError
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -55,9 +55,13 @@ from .ocr import detect_table_lines, get_ocr_status
 from .pdf_utils import LocalImageBundle, LocalPdf
 from .pdf_report import IngestionNotCompleteError, SourceChangedError, build_ingestion_report
 from .processing import (
+    ID_EXTRACTOR_VERSION,
     RelationshipEligibility,
+    _extract_party_names_from_pages,
     ensure_fresh_identification_documents,
     evaluate_article_34_relationship,
+    extract_identification_documents,
+    needs_identification_recompute,
     parse_indian_currency_amount,
     process_ingestion,
     refresh_ingestion_extraction,
@@ -128,7 +132,108 @@ class ComparisonRequest(BaseModel):
     mode: Literal["pp_structure", "docling", "compare"]
 
 
+class NameVerificationDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    status: Literal["unverified", "exact_match", "minor_variation", "mismatch"] = "unverified"
+    severity: Literal["none", "info", "warning", "high"] = "info"
+    flagged: bool = False
+    deed_name: str | None = None
+    id_holder_name: str | None = None
+    normalized_deed_name: str | None = None
+    normalized_id_name: str | None = None
+    similarity_score: float = 0.0
+    discrepancy_reason: str | None = None
+    missing_tokens: list[str] = Field(default_factory=list)
+    extra_tokens: list[str] = Field(default_factory=list)
+
+
+class IdentificationDocumentItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    doc_type: str = "other"
+    id_sub_type: str | None = None
+    id_number: str | None = None
+    holder_name: str | None = None
+    holder_name_source: str = "id_document"
+    party_role: str | None = None
+    deed_name: str | None = None
+    name_verification: NameVerificationDetail = Field(default_factory=NameVerificationDetail)
+    father_name: str | None = None
+    dob_or_yob: str | None = None
+    gender: str | None = None
+    page_numbers: list[int] = Field(default_factory=list)
+    confidence: str = "medium"
+    evidence_snippet: str | None = None
+
+
+class GroupedIdentificationDocuments(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    pan_card: list[IdentificationDocumentItem] = Field(default_factory=list)
+    aadhaar_card: list[IdentificationDocumentItem] = Field(default_factory=list)
+    other_id: list[IdentificationDocumentItem] = Field(default_factory=list)
+
+
+class FlaggedDiscrepancyItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    doc_type: str | None = None
+    id_sub_type: str | None = None
+    id_number: str | None = None
+    party_role: str | None = None
+    deed_name: str | None = None
+    id_holder_name: str | None = None
+    status: str | None = None
+    severity: str | None = None
+    discrepancy_reason: str | None = None
+    page_numbers: list[int] = Field(default_factory=list)
+
+
+class NameVerificationSummary(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    total_evaluated: int = 0
+    exact_match_count: int = 0
+    minor_variation_count: int = 0
+    mismatch_count: int = 0
+    unverified_count: int = 0
+    has_discrepancies: bool = False
+    flagged_discrepancies: list[FlaggedDiscrepancyItem] = Field(default_factory=list)
+
+
+class CanonicalDeedParty(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    party_role: str
+    deed_name: str
+    normalized_deed_name: str
+    page_number: int
+
+
+class IdentificationDocumentsSummaryCounts(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    pan_card: int = 0
+    aadhaar_card: int = 0
+    other_id: int = 0
+    total: int = 0
+
+
+class IdentificationDocumentsResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    extractor_version: int = 3
+    status: Literal["found", "not_found", "uncertain"] = "not_found"
+    summary_counts: IdentificationDocumentsSummaryCounts = Field(
+        default_factory=IdentificationDocumentsSummaryCounts
+    )
+    grouped_documents: GroupedIdentificationDocuments = Field(
+        default_factory=GroupedIdentificationDocuments
+    )
+    pan_card: list[IdentificationDocumentItem] = Field(default_factory=list)
+    aadhaar_card: list[IdentificationDocumentItem] = Field(default_factory=list)
+    other_id: list[IdentificationDocumentItem] = Field(default_factory=list)
+    deed_parties: list[CanonicalDeedParty] = Field(default_factory=list)
+    name_verification_summary: NameVerificationSummary = Field(
+        default_factory=NameVerificationSummary
+    )
+
+
 class StampDutyAssessmentResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     id: int
     document_id: str | int
     donor_name: str | None = None
@@ -155,8 +260,8 @@ class StampDutyAssessmentResponse(BaseModel):
     effective_date: str | None = "2017-05-16"
     calculation_components: Any = None
     source_evidence: Any = None
-    identification_documents: dict[str, Any] = Field(
-        default_factory=lambda: _parse_identification_documents(None)
+    identification_documents: IdentificationDocumentsResponse = Field(
+        default_factory=IdentificationDocumentsResponse
     )
     market_value: int | None = None
     base_stamp_duty: int | None = None
@@ -708,6 +813,13 @@ def ingestion_report_pdf(ingestion_id: str, db: Session = Depends(get_db)):
     ingestion = db.get(Ingestion, ingestion_id)
     if ingestion is None:
         raise HTTPException(404, "Ingestion not found.")
+    docs = db.scalars(
+        select(LogicalDocument)
+        .options(selectinload(LogicalDocument.stamp_duty_assessment))
+        .where(LogicalDocument.ingestion_id == ingestion_id)
+    ).all()
+    for d in docs:
+        _resolve_identification_documents(db, d, d.stamp_duty_assessment)
     try:
         report = build_ingestion_report(db, ingestion_id)
     except LookupError as exc:
@@ -785,8 +897,109 @@ def reprocess_ingestion_fields(ingestion_id: str, db: Session = Depends(get_db))
     return {"id": ingestion_id, "status": ingestion.status, **summary}
 
 
+def _normalize_name_verification(ver: Any, item: dict[str, Any]) -> dict[str, Any]:
+    d_name = item.get("deed_name")
+    h_name = item.get("holder_name")
+    if not isinstance(ver, dict):
+        return {
+            "status": "unverified",
+            "severity": "info",
+            "flagged": False,
+            "deed_name": d_name,
+            "id_holder_name": h_name,
+            "normalized_deed_name": None,
+            "normalized_id_name": None,
+            "similarity_score": 0.0,
+            "discrepancy_reason": (
+                "No separate name on an attached ID document available to cross-verify against the Gift Deed"
+                if item.get("holder_name_source") == "deed_recital_only" or h_name is None
+                else "Gift Deed party name could not be linked"
+            ),
+            "missing_tokens": [],
+            "extra_tokens": [],
+        }
+    return {
+        "status": ver.get("status") or "unverified",
+        "severity": ver.get("severity") or "info",
+        "flagged": bool(ver.get("flagged", False)),
+        "deed_name": ver.get("deed_name") or d_name,
+        "id_holder_name": ver.get("id_holder_name") or h_name,
+        "normalized_deed_name": ver.get("normalized_deed_name"),
+        "normalized_id_name": ver.get("normalized_id_name"),
+        "similarity_score": float(ver.get("similarity_score", 0.0) or 0.0),
+        "discrepancy_reason": ver.get("discrepancy_reason"),
+        "missing_tokens": list(ver.get("missing_tokens") or []),
+        "extra_tokens": list(ver.get("extra_tokens") or []),
+    }
+
+
+def _normalize_id_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    res = dict(item)
+    res["deed_name"] = res.get("deed_name")
+    res["name_verification"] = _normalize_name_verification(res.get("name_verification"), res)
+    return res
+
+
+def _build_name_verification_summary(
+    raw_summary: Any,
+    all_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if isinstance(raw_summary, dict) and "total_evaluated" in raw_summary:
+        return {
+            "total_evaluated": int(raw_summary.get("total_evaluated", 0) or 0),
+            "exact_match_count": int(raw_summary.get("exact_match_count", 0) or 0),
+            "minor_variation_count": int(raw_summary.get("minor_variation_count", 0) or 0),
+            "mismatch_count": int(raw_summary.get("mismatch_count", 0) or 0),
+            "unverified_count": int(raw_summary.get("unverified_count", 0) or 0),
+            "has_discrepancies": bool(raw_summary.get("has_discrepancies", False)),
+            "flagged_discrepancies": list(raw_summary.get("flagged_discrepancies") or []),
+        }
+    total_evaluated = len(all_items)
+    exact_match = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "exact_match")
+    minor_var = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "minor_variation")
+    mismatch = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "mismatch")
+    unverified = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "unverified")
+    has_disc = bool(minor_var > 0 or mismatch > 0)
+    flagged = [
+        {
+            "doc_type": it.get("doc_type"),
+            "id_sub_type": it.get("id_sub_type"),
+            "id_number": it.get("id_number"),
+            "party_role": it.get("party_role"),
+            "deed_name": it.get("name_verification", {}).get("deed_name"),
+            "id_holder_name": it.get("name_verification", {}).get("id_holder_name"),
+            "status": it.get("name_verification", {}).get("status"),
+            "severity": it.get("name_verification", {}).get("severity"),
+            "discrepancy_reason": it.get("name_verification", {}).get("discrepancy_reason"),
+            "page_numbers": it.get("page_numbers", []),
+        }
+        for it in all_items
+        if it.get("name_verification", {}).get("flagged")
+    ]
+    return {
+        "total_evaluated": total_evaluated,
+        "exact_match_count": exact_match,
+        "minor_variation_count": minor_var,
+        "mismatch_count": mismatch,
+        "unverified_count": unverified,
+        "has_discrepancies": has_disc,
+        "flagged_discrepancies": flagged,
+    }
+
+
 def _parse_identification_documents(raw: Any) -> dict[str, Any]:
     empty_grouped: dict[str, list[dict[str, Any]]] = {"pan_card": [], "aadhaar_card": [], "other_id": []}
+    empty_summary = {
+        "total_evaluated": 0,
+        "exact_match_count": 0,
+        "minor_variation_count": 0,
+        "mismatch_count": 0,
+        "unverified_count": 0,
+        "has_discrepancies": False,
+        "flagged_discrepancies": [],
+    }
     data: Any = raw
     if isinstance(raw, str) and raw.strip().startswith("{"):
         try:
@@ -795,17 +1008,20 @@ def _parse_identification_documents(raw: Any) -> dict[str, Any]:
             data = None
     if not isinstance(data, dict):
         return {
+            "extractor_version": 3,
             "status": "not_found",
             "summary_counts": {"pan_card": 0, "aadhaar_card": 0, "other_id": 0, "total": 0},
             "grouped_documents": empty_grouped,
             "pan_card": [],
             "aadhaar_card": [],
             "other_id": [],
+            "deed_parties": [],
+            "name_verification_summary": empty_summary,
         }
     grouped_src = data.get("grouped_documents") if isinstance(data.get("grouped_documents"), dict) else data
-    pan_list = list(grouped_src.get("pan_card") or data.get("pan_card") or [])
-    aadhaar_list = list(grouped_src.get("aadhaar_card") or data.get("aadhaar_card") or [])
-    other_list = list(grouped_src.get("other_id") or data.get("other_id") or [])
+    pan_list = [_normalize_id_item(x) for x in (grouped_src.get("pan_card") or data.get("pan_card") or [])]
+    aadhaar_list = [_normalize_id_item(x) for x in (grouped_src.get("aadhaar_card") or data.get("aadhaar_card") or [])]
+    other_list = [_normalize_id_item(x) for x in (grouped_src.get("other_id") or data.get("other_id") or [])]
     total = len(pan_list) + len(aadhaar_list) + len(other_list)
     status = data.get("status")
     if status not in ("found", "not_found", "uncertain"):
@@ -819,7 +1035,14 @@ def _parse_identification_documents(raw: Any) -> dict[str, Any]:
                 for item in all_items
             )
             status = "found" if has_definite else "uncertain"
+
+    deed_parties = list(data.get("deed_parties") or [])
+    all_items = [*pan_list, *aadhaar_list, *other_list]
+    summary = _build_name_verification_summary(data.get("name_verification_summary"), all_items)
+    extractor_ver = int(data.get("extractor_version", 3) or 3)
+
     return {
+        "extractor_version": extractor_ver,
         "status": status,
         "summary_counts": {
             "pan_card": len(pan_list),
@@ -835,7 +1058,169 @@ def _parse_identification_documents(raw: Any) -> dict[str, Any]:
         "pan_card": pan_list,
         "aadhaar_card": aadhaar_list,
         "other_id": other_list,
+        "deed_parties": deed_parties,
+        "name_verification_summary": summary,
     }
+
+
+def _resolve_identification_documents(
+    db: Session,
+    document: LogicalDocument,
+    assessment: StampDutyAssessment | None = None,
+) -> dict[str, Any]:
+    """
+    Ensure identification documents have extractor_version >= 3 and name_verification_summary.
+    If stored JSON in assessment is missing, empty, or outdated (< v3 / missing summary),
+    recomputes on the fly using document pages, persists to DB, and returns the parsed dict.
+    """
+    if assessment is None and getattr(document, "stamp_duty_assessment", None) is not None:
+        assessment = document.stamp_duty_assessment
+    if assessment is None and hasattr(document, "id") and document.id:
+        assessment = db.scalar(
+            select(StampDutyAssessment).where(StampDutyAssessment.document_id == document.id)
+        )
+
+    raw = None
+    if assessment is not None:
+        raw = getattr(assessment, "extracted_id_documents_json", None) or getattr(
+            assessment, "identification_documents", None
+        )
+
+    needs_recompute = False
+    parsed_data = None
+    if not raw or (isinstance(raw, str) and not raw.strip()):
+        needs_recompute = True
+    elif isinstance(raw, dict):
+        parsed_data = raw
+    elif isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            parsed_data = json.loads(raw)
+        except Exception:
+            needs_recompute = True
+    else:
+        needs_recompute = True
+
+    if not needs_recompute and isinstance(parsed_data, dict):
+        try:
+            ver = int(parsed_data.get("extractor_version", 0))
+        except Exception:
+            ver = 0
+        if ver < 3:
+            needs_recompute = True
+
+    if not needs_recompute and parsed_data is not None:
+        return _parse_identification_documents(parsed_data)
+
+    # Fetch document's ordered Page records (document.pages)
+    pages = list(getattr(document, "pages", None) or [])
+    if not pages and db is not None and getattr(document, "ingestion_id", None):
+        pages = list(
+            db.scalars(
+                select(Page)
+                .where(
+                    Page.ingestion_id == document.ingestion_id,
+                    Page.page_number >= document.start_page,
+                    Page.page_number <= document.end_page,
+                )
+                .order_by(Page.page_number)
+            ).all()
+        )
+
+    if not pages:
+        fallback = _parse_identification_documents(None)
+        if assessment is not None and not getattr(assessment, "extracted_id_documents_json", None) and not getattr(assessment, "identification_documents", None):
+            fallback_json = json.dumps(fallback, ensure_ascii=False)
+            setattr(assessment, "extracted_id_documents_json", fallback_json)
+            if hasattr(assessment, "identification_documents"):
+                assessment.identification_documents = fallback_json
+            if db is not None:
+                try:
+                    db.commit()
+                    db.refresh(assessment)
+                except Exception:
+                    db.flush()
+        return fallback
+
+    all_ingestion_pages = []
+    if db is not None and getattr(document, "ingestion_id", None):
+        all_ingestion_pages = list(
+            db.scalars(
+                select(Page)
+                .where(Page.ingestion_id == document.ingestion_id)
+                .order_by(Page.page_number)
+            ).all()
+        )
+
+    donor_name = getattr(assessment, "donor_name", None) if assessment else None
+    donee_name = getattr(assessment, "donee_name", None) if assessment else None
+
+    if assessment is not None and (donor_name is None or donee_name is None):
+        norm_doc_pages = [
+            (
+                p.page_number,
+                getattr(p, "ocr_text_corrected", None)
+                or getattr(p, "ocr_text_original", None)
+                or getattr(p, "digital_text", None)
+                or "",
+            )
+            for p in pages
+        ]
+        d_name, e_name, _ = _extract_party_names_from_pages(
+            norm_doc_pages,
+            donor_name=donor_name,
+            donee_name=donee_name,
+            all_pages=all_ingestion_pages if all_ingestion_pages else None,
+        )
+        if donor_name is None and d_name:
+            assessment.donor_name = d_name
+            donor_name = d_name
+        if donee_name is None and e_name:
+            assessment.donee_name = e_name
+            donee_name = e_name
+
+    page_dicts = [
+        {
+            "page_number": p.page_number,
+            "ocr_text": getattr(p, "ocr_text_corrected", None)
+            or getattr(p, "ocr_text_original", None)
+            or getattr(p, "digital_text", None)
+            or "",
+            "category": getattr(p, "category", None),
+        }
+        for p in pages
+    ]
+    all_page_dicts = [
+        {
+            "page_number": p.page_number,
+            "ocr_text": getattr(p, "ocr_text_corrected", None)
+            or getattr(p, "ocr_text_original", None)
+            or getattr(p, "digital_text", None)
+            or "",
+            "category": getattr(p, "category", None),
+        }
+        for p in all_ingestion_pages
+    ] if all_ingestion_pages else None
+
+    fresh_ids = extract_identification_documents(
+        page_dicts,
+        donor_name=donor_name,
+        donee_name=donee_name,
+        all_pages=all_page_dicts,
+    )
+    fresh_json = json.dumps(fresh_ids, ensure_ascii=False)
+
+    if assessment is not None:
+        setattr(assessment, "extracted_id_documents_json", fresh_json)
+        if hasattr(assessment, "identification_documents"):
+            assessment.identification_documents = fresh_json
+        if db is not None:
+            try:
+                db.commit()
+                db.refresh(assessment)
+            except Exception:
+                db.flush()
+
+    return _parse_identification_documents(fresh_ids)
 
 
 def _serialize_stamp_duty_assessment(assessment: StampDutyAssessment | None) -> dict | None:
@@ -898,7 +1283,10 @@ def _serialize_stamp_duty_assessment(assessment: StampDutyAssessment | None) -> 
         "effective_date": assessment.effective_date or "2017-05-16",
         "calculation_components": calc_components,
         "source_evidence": source_ev,
-        "identification_documents": _parse_identification_documents(getattr(assessment, "identification_documents", None)),
+        "identification_documents": _parse_identification_documents(
+            getattr(assessment, "extracted_id_documents_json", None)
+            or getattr(assessment, "identification_documents", None)
+        ),
         "market_value": assessment.market_value,
         "base_stamp_duty": assessment.base_duty,
         "metro_cess_rate": assessment.metro_cess_rate,
@@ -1253,7 +1641,7 @@ def document_detail(document_id: str, db: Session = Depends(get_db)):
     )
     if not row:
         raise HTTPException(404, "Document not found.")
-    ensure_fresh_identification_documents(db, [row])
+    _resolve_identification_documents(db, row, row.stamp_duty_assessment)
     pages = db.scalars(select(Page).where(Page.ingestion_id == row.ingestion_id, Page.page_number >= row.start_page, Page.page_number <= row.end_page).order_by(Page.page_number)).all()
     findings = db.scalars(
         select(ValidationFinding)
@@ -1438,6 +1826,42 @@ def review_case_link(document_id: str, payload: CaseLinkDecision, db: Session = 
     return {"id": doc.id, "case_id": doc.case_id, "case_link_status": doc.case_link_status}
 
 
+@app.get("/api/documents/{document_id}/stamp-duty", response_model=StampDutyAssessmentResponse)
+@app.get("/api/documents/{document_id}/stamp-duty-assessment", response_model=StampDutyAssessmentResponse)
+def get_stamp_duty_assessment(document_id: str, db: Session = Depends(get_db)):
+    doc = db.scalar(
+        select(LogicalDocument)
+        .options(selectinload(LogicalDocument.fields), selectinload(LogicalDocument.stamp_duty_assessment))
+        .where(LogicalDocument.id == document_id)
+    )
+    if not doc:
+        raise HTTPException(404, "Document not found.")
+    assessment = doc.stamp_duty_assessment
+    if not assessment:
+        assessment = StampDutyAssessment(document_id=doc.id)
+        db.add(assessment)
+        doc.stamp_duty_assessment = assessment
+        db.flush()
+    id_docs = _resolve_identification_documents(db, doc, assessment)
+    serialized = _serialize_stamp_duty_assessment(assessment)
+    if serialized is not None:
+        serialized["identification_documents"] = id_docs
+    return serialized
+
+
+@app.get("/api/documents/{document_id}/report.pdf")
+def document_report_pdf(document_id: str, db: Session = Depends(get_db)):
+    doc = db.scalar(
+        select(LogicalDocument)
+        .options(selectinload(LogicalDocument.fields), selectinload(LogicalDocument.stamp_duty_assessment))
+        .where(LogicalDocument.id == document_id)
+    )
+    if not doc:
+        raise HTTPException(404, "Document not found.")
+    _resolve_identification_documents(db, doc, doc.stamp_duty_assessment)
+    return ingestion_report_pdf(doc.ingestion_id, db=db)
+
+
 @app.patch("/api/documents/{document_id}/stamp-duty-assessment", response_model=StampDutyAssessmentResponse)
 def update_stamp_duty_assessment(
     document_id: str,
@@ -1516,10 +1940,13 @@ def update_stamp_duty_assessment(
         old_status,
         assessment.status,
     )
-    ensure_fresh_identification_documents(db, [doc], commit=False)
+    id_docs = _resolve_identification_documents(db, doc, assessment)
     db.commit()
     db.refresh(assessment)
-    return _serialize_stamp_duty_assessment(assessment)
+    serialized = _serialize_stamp_duty_assessment(assessment)
+    if serialized is not None:
+        serialized["identification_documents"] = id_docs
+    return serialized
 
 
 @app.post("/api/documents/{document_id}/split", status_code=201)

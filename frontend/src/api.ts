@@ -137,19 +137,70 @@ export interface Finding {
   review_status: string;
 }
 
+export interface IdNameVerification {
+  status: "exact_match" | "minor_variation" | "mismatch" | "unverified";
+  severity: "none" | "warning" | "high" | "info";
+  flagged: boolean;
+  deed_name: string | null;
+  id_holder_name: string | null;
+  normalized_deed_name: string | null;
+  normalized_id_name: string | null;
+  similarity_score: number;
+  discrepancy_reason: string | null;
+  missing_tokens: string[];
+  extra_tokens: string[];
+}
+
+export interface FlaggedNameDiscrepancy {
+  doc_type?: string | null;
+  id_sub_type?: string | null;
+  id_number?: string | null;
+  party_role?: string | null;
+  deed_name?: string | null;
+  id_holder_name?: string | null;
+  status?: "exact_match" | "minor_variation" | "mismatch" | "unverified" | string | null;
+  severity?: "none" | "warning" | "high" | "info" | string | null;
+  discrepancy_reason?: string | null;
+  page_numbers?: number[];
+}
+
+export interface NameVerificationSummary {
+  total_evaluated: number;
+  exact_match_count: number;
+  minor_variation_count: number;
+  mismatch_count: number;
+  unverified_count: number;
+  has_discrepancies: boolean;
+  flagged_discrepancies: FlaggedNameDiscrepancy[];
+}
+
+export interface CanonicalDeedParty {
+  party_role: string;
+  deed_name: string;
+  normalized_deed_name: string;
+  page_number: number;
+}
+
 export interface IdentificationDocumentItem {
   doc_type: "pan_card" | "aadhaar_card" | "other_id" | string;
   id_sub_type: string;
   id_number: string | null;
   holder_name: string | null;
+  holder_name_source?: "id_document" | "deed_recital_only" | string;
   party_role: "Donor" | "Donee" | "Witness" | "Unknown" | string;
+  deed_name?: string | null;
+  name_verification?: IdNameVerification;
+  father_name?: string | null;
+  dob_or_yob?: string | null;
   dob_or_age: string | null;
+  gender?: string | null;
   page_numbers: number[];
   confidence: "high" | "medium" | "low" | string;
   evidence_snippet: string;
 }
 
 export interface IdentificationDocumentsGroup {
+  extractor_version?: number;
   status: "found" | "not_found" | "uncertain" | string;
   summary_counts: {
     pan_card: number;
@@ -165,7 +216,11 @@ export interface IdentificationDocumentsGroup {
   pan_card: IdentificationDocumentItem[];
   aadhaar_card: IdentificationDocumentItem[];
   other_id: IdentificationDocumentItem[];
+  deed_parties?: CanonicalDeedParty[];
+  name_verification_summary?: NameVerificationSummary;
 }
+
+export type IdentificationDocuments = IdentificationDocumentsGroup;
 
 export interface Document {
   id: string;

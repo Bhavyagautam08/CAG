@@ -20,6 +20,7 @@ from backend.app.models import (
     Ingestion,
     LogicalDocument,
     Page,
+    StampDutyAssessment,
     ValidationFinding,
 )
 from backend.app.ocr import detect_table_lines
@@ -1367,12 +1368,36 @@ def test_identification_documents_legacy_null_fallback_in_api():
     assert detail_resp.status_code == 200
     details = detail_resp.json()
     expected_empty = {
+        "extractor_version": 3,
         "status": "not_found",
         "summary_counts": {"pan_card": 0, "aadhaar_card": 0, "other_id": 0, "total": 0},
         "grouped_documents": {"pan_card": [], "aadhaar_card": [], "other_id": []},
         "pan_card": [],
         "aadhaar_card": [],
         "other_id": [],
+        "deed_parties": [
+            {
+                "party_role": "Donor",
+                "deed_name": "Ramesh Kulkarni",
+                "normalized_deed_name": "Ramesh Kulkarni",
+                "page_number": 1,
+            },
+            {
+                "party_role": "Donee",
+                "deed_name": "Suresh Kulkarni",
+                "normalized_deed_name": "Suresh Kulkarni",
+                "page_number": 1,
+            },
+        ],
+        "name_verification_summary": {
+            "total_evaluated": 0,
+            "exact_match_count": 0,
+            "minor_variation_count": 0,
+            "mismatch_count": 0,
+            "unverified_count": 0,
+            "has_discrepancies": False,
+            "flagged_discrepancies": [],
+        },
     }
     assert details["identification_documents"] == expected_empty
     assert details["stamp_duty_assessment"]["identification_documents"] == expected_empty
@@ -1448,5 +1473,221 @@ def test_identification_documents_auto_recomputes_when_extractor_version_outdate
         refreshed = db.query(StampDutyAssessment).filter_by(document_id=gift_doc["id"]).one()
         persisted = json.loads(refreshed.identification_documents)
         assert persisted["extractor_version"] == ID_EXTRACTOR_VERSION
+        assert "name_verification_summary" in persisted
+        assert "deed_parties" in persisted
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_resolve_identification_documents_endpoints_and_fallback():
+    from backend.app.main import _resolve_identification_documents
+    from backend.app.models import LogicalDocument, StampDutyAssessment
+
+    page_1 = (
+        "GIFT DEED\n"
+        "This Deed of Gift is made between:\n"
+        "MR. RAJESH KUMAR SHARMA, PAN: ABCDE1234F, hereinafter called the DONOR;\n"
+        "AND\n"
+        "MR. SURESH RAJESH SHARMA, Aadhaar No: 9876 5432 1098, hereinafter called the DONEE.\n"
+        "WHEREAS Donor gifts property to Donee.\n"
+        "Schedule of Property: Flat 5B, Pune.\n"
+        "Market Value: Rs. 40,00,000/-\n"
+        "Total Stamp Duty Paid: Rs. 200/-"
+    )
+    page_2 = (
+        "INCOME TAX DEPARTMENT\n"
+        "PERMANENT ACCOUNT NUMBER CARD\n"
+        "Name\n"
+        "R K SHARMA\n"
+        "Father's Name\n"
+        "RAM SHARMA\n"
+        "ABCDE1234F\n"
+        "DOB: 12/08/1970"
+    )
+
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("resolve_test.pdf", pdf_bytes([page_1, page_2]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+
+    # Test GET /api/documents/{id}/stamp-duty
+    resp = client.get(f"/api/documents/{gift_doc['id']}/stamp-duty")
+    assert resp.status_code == 200
+    duty_data = resp.json()
+    id_docs = duty_data["identification_documents"]
+
+    assert id_docs["extractor_version"] == 3
+    assert len(id_docs["deed_parties"]) >= 2
+    assert id_docs["name_verification_summary"]["total_evaluated"] >= 1
+
+    pan_cards = id_docs["grouped_documents"]["pan_card"]
+    assert len(pan_cards) == 1
+    donor_pan = pan_cards[0]
+    assert donor_pan["id_number"] == "ABCDE1234F"
+    assert donor_pan["holder_name"] == "R K SHARMA"
+    assert donor_pan["deed_name"] in ("RAJESH KUMAR SHARMA", "MR. RAJESH KUMAR SHARMA")
+
+    # Name verification detail structure
+    ver = donor_pan["name_verification"]
+    assert ver["status"] == "minor_variation"
+    assert ver["flagged"] is True
+    assert ver["severity"] == "warning"
+    assert ver["id_holder_name"] == "R K SHARMA"
+    assert "Initial" in ver["discrepancy_reason"]
+
+    # Test GET /api/documents/{id}/report.pdf
+    pdf_resp = client.get(f"/api/documents/{gift_doc['id']}/report.pdf")
+    assert pdf_resp.status_code == 200
+    assert "application/pdf" in pdf_resp.headers["content-type"]
+
+    # Test _resolve_identification_documents on document without pages (fallback safe default)
+    with SessionLocal() as db:
+        empty_doc = LogicalDocument(
+            ingestion_id="nonexistent-ingestion",
+            start_page=1,
+            end_page=1,
+            category="gift_deed",
+        )
+        empty_assessment = StampDutyAssessment(
+            document=empty_doc,
+        )
+        fallback = _resolve_identification_documents(db, empty_doc, empty_assessment)
+        assert fallback["status"] == "not_found"
+        assert fallback["summary_counts"]["total"] == 0
+        assert fallback["grouped_documents"]["pan_card"] == []
+        assert fallback["name_verification_summary"]["total_evaluated"] == 0
+        assert fallback["name_verification_summary"]["has_discrepancies"] is False
+        assert fallback["extractor_version"] == 3
+
+        # Test extracted_id_documents_json property on StampDutyAssessment
+        assert empty_assessment.extracted_id_documents_json == empty_assessment.identification_documents
+        empty_assessment.extracted_id_documents_json = '{"test": 123}'
+        assert empty_assessment.identification_documents == '{"test": 123}'
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_api_stamp_duty_auto_recompute_when_extractor_version_outdated():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-TEST-RECOMP-01\n"
+        "Donor: Ramesh Kulkarni, aged 64 years, PAN: ABCDE1234F\n"
+        "Donee: Suresh Kulkarni, aged 32 years\n"
+        "WHEREAS Donor gifts residential property to Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune.\n"
+        "Market Value: ₹ 30,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 30,200/-"
+    )
+
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("recomp_test.pdf", pdf_bytes([page_1]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+    doc_id = gift_doc["id"]
+
+    # Manually simulate an existing legacy DB row with extractor_version < 3
+    with SessionLocal() as db:
+        ass = db.query(StampDutyAssessment).filter_by(document_id=doc_id).one()
+        ass.identification_documents = json.dumps(
+            {
+                "extractor_version": 2,
+                "status": "found",
+                "pan_card": [{"doc_type": "pan_card", "id_number": "ABCDE1234F", "holder_name": "OLD LEGACY NAME"}],
+            }
+        )
+        db.commit()
+
+    # Call GET /api/documents/{id}/stamp-duty: must auto-recompute to extractor_version 3
+    resp = client.get(f"/api/documents/{doc_id}/stamp-duty")
+    assert resp.status_code == 200
+    duty_data = resp.json()
+    id_docs = duty_data["identification_documents"]
+
+    assert id_docs["extractor_version"] == 3
+    assert "name_verification_summary" in id_docs
+    assert id_docs["name_verification_summary"]["total_evaluated"] >= 1
+    assert len(id_docs["grouped_documents"]["pan_card"]) >= 1
+
+    pan_item = id_docs["grouped_documents"]["pan_card"][0]
+    assert pan_item["id_number"] == "ABCDE1234F"
+    assert "name_verification" in pan_item
+    assert pan_item["name_verification"]["status"] in ("exact_match", "unverified", "minor_variation")
+
+    # Verify that database row was backfilled and persisted permanently
+    with SessionLocal() as db:
+        ass = db.query(StampDutyAssessment).filter_by(document_id=doc_id).one()
+        persisted = json.loads(ass.identification_documents)
+        assert persisted.get("extractor_version") == 3
+        assert "name_verification_summary" in persisted
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_api_document_pdf_report_renders_flagged_name_discrepancies():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-TEST-DISC-01\n"
+        "Donor: Smt. Kavita Ajay Deshmukh, aged 45 years, holding PAN ABCDE1234F\n"
+        "Donee: Rahul Deshmukh, aged 22 years\n"
+        "WHEREAS Donor gifts the flat to Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune.\n"
+        "Market Value: ₹ 30,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 30,200/-"
+    )
+    page_2 = (
+        "INCOME TAX DEPARTMENT\n"
+        "PERMANENT ACCOUNT NUMBER CARD\n"
+        "ABCDE1234F\n"
+        "Name\n"
+        "KAVITA A DESHMUKH\n"
+        "Date of Birth\n"
+        "12/08/1979"
+    )
+
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("disc_test.pdf", pdf_bytes([page_1, page_2]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+    doc_id = gift_doc["id"]
+
+    # Verify GET /api/documents/{id}/report.pdf
+    doc_report = client.get(f"/api/documents/{doc_id}/report.pdf")
+    assert doc_report.status_code == 200
+    assert doc_report.content.startswith(b"%PDF-")
+
+    reader = PdfReader(io.BytesIO(doc_report.content))
+    all_text = "\n".join(p.extract_text() or "" for p in reader.pages).lower()
+    assert "extracted identification documents" in all_text
+    assert "name verification summary" in all_text
+    assert "flagged name discrepancies" in all_text
+    assert "kavita a deshmukh" in all_text
+    assert "kavita ajay deshmukh" in all_text
+    assert "minor variation" in all_text
+
+    # Also verify GET /api/ingestions/{id}/report.pdf
+    ing_report = client.get(f"/api/ingestions/{ingestion_id}/report.pdf")
+    assert ing_report.status_code == 200
+    assert ing_report.content.startswith(b"%PDF-")
 
     client.delete(f"/api/ingestions/{ingestion_id}")

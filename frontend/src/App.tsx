@@ -1375,9 +1375,170 @@ function IdentificationDocumentsSection({
     { key: "other_id", title: "Other Identification Documents", emptyText: "No Other Identification Documents detected." },
   ];
 
+  const summary = idDocs?.name_verification_summary;
+  const flaggedList = summary?.flagged_discrepancies || [];
+
   return (
     <div className="sda-section">
       <div className="sda-section-title">Extracted Identification Documents</div>
+
+      {/* 1. Name Verification Summary Banner */}
+      {summary && (
+        <div className="id-verification-summary-wrapper">
+          {summary.mismatch_count > 0 ? (
+            <div className="id-verification-banner mismatch">
+              <div className="id-verification-banner-main">
+                <AlertCircle className="id-verification-banner-icon" size={18} />
+                <div>
+                  <div className="id-verification-banner-title">
+                    Name Mismatch Detected Between Gift Deed and Identification Document(s)
+                  </div>
+                  <div className="id-verification-banner-counts">
+                    <span><b>Mismatches:</b> {summary.mismatch_count}</span>
+                    <span className="dot-sep">•</span>
+                    <span><b>Minor Variations:</b> {summary.minor_variation_count}</span>
+                    <span className="dot-sep">•</span>
+                    <span><b>Exact Matches:</b> {summary.exact_match_count}</span>
+                    <span className="dot-sep">•</span>
+                    <span><b>Unverified:</b> {summary.unverified_count}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : summary.minor_variation_count > 0 ? (
+            <div className="id-verification-banner minor-variation">
+              <div className="id-verification-banner-main">
+                <AlertCircle className="id-verification-banner-icon" size={18} />
+                <div>
+                  <div className="id-verification-banner-title">
+                    Minor Name Variation(s) Detected (Initials / Middle Name / Spelling)
+                  </div>
+                  <div className="id-verification-banner-counts">
+                    <span><b>Minor Variations:</b> {summary.minor_variation_count}</span>
+                    <span className="dot-sep">•</span>
+                    <span><b>Exact Matches:</b> {summary.exact_match_count}</span>
+                    <span className="dot-sep">•</span>
+                    <span><b>Unverified:</b> {summary.unverified_count}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : summary.exact_match_count > 0 ? (
+            <div className="id-verification-banner exact-match">
+              <div className="id-verification-banner-main">
+                <ShieldCheck className="id-verification-banner-icon" size={18} />
+                <div>
+                  <div className="id-verification-banner-title">
+                    All Extracted ID Names Match Gift Deed Party Names
+                  </div>
+                  <div className="id-verification-banner-counts">
+                    <span><b>Exact Matches:</b> {summary.exact_match_count}</span>
+                    {summary.unverified_count > 0 && (
+                      <>
+                        <span className="dot-sep">•</span>
+                        <span><b>Unverified:</b> {summary.unverified_count}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="id-verification-banner unverified">
+              <div className="id-verification-banner-main">
+                <CircleHelp className="id-verification-banner-icon" size={18} />
+                <div>
+                  <div className="id-verification-banner-title">
+                    Name Verification: Unverified
+                  </div>
+                  <div className="id-verification-banner-counts">
+                    <span><b>Unverified:</b> {summary.unverified_count}</span>
+                    <span className="dot-sep">•</span>
+                    <span>Total Evaluated: {summary.total_evaluated}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 2. Flagged Name Discrepancies Summary Box */}
+      {flaggedList.length > 0 && (
+        <div className="id-flagged-box">
+          <div className="id-flagged-box-header">
+            <span className="id-flagged-box-title">Flagged Name Discrepancies (Gift Deed vs. ID Document)</span>
+            <span className="id-flagged-count-pill">{flaggedList.length} Flagged</span>
+          </div>
+          <div className="id-flagged-list">
+            {flaggedList.map((disc, dIdx) => {
+              const roleKey = (disc.party_role || "Unknown").toLowerCase();
+              const isMismatch = disc.status === "mismatch";
+              return (
+                <div
+                  className={`id-flagged-card ${isMismatch ? "mismatch" : "minor-variation"}`}
+                  key={`flagged-${disc.id_number ?? dIdx}-${dIdx}`}
+                >
+                  <div className="id-flagged-card-header">
+                    <div className="id-flagged-card-badges">
+                      <span className={`id-role-badge ${roleKey}`}>
+                        {disc.party_role || "Unknown"}
+                      </span>
+                      <span className="id-flagged-doc-type">
+                        {humanize(disc.id_sub_type || disc.doc_type || "ID")}
+                      </span>
+                      {disc.id_number && <code>{disc.id_number}</code>}
+                    </div>
+                    {isMismatch ? (
+                      <span className="id-name-badge mismatch">Name Mismatch</span>
+                    ) : (
+                      <span className="id-name-badge minor-variation">Minor Name Difference</span>
+                    )}
+                  </div>
+
+                  <div className="id-name-comparison-grid">
+                    <div className="id-name-cell">
+                      <span className="id-name-label">Name in Gift Deed:</span>
+                      <span className="id-name-val deed">{disc.deed_name || "—"}</span>
+                    </div>
+                    <div className="id-name-cell">
+                      <span className="id-name-label">Name on ID:</span>
+                      <span className="id-name-val id">{disc.id_holder_name || "—"}</span>
+                    </div>
+                  </div>
+
+                  {disc.discrepancy_reason && (
+                    <div className="id-doc-discrepancy-callout">
+                      <strong>Discrepancy Details:</strong> {disc.discrepancy_reason}
+                    </div>
+                  )}
+
+                  {disc.page_numbers && disc.page_numbers.length > 0 && (
+                    <div className="id-flagged-card-pages">
+                      <span className="sda-label">Source:</span>
+                      <div className="sda-page-badges">
+                        {disc.page_numbers.map((p) => (
+                          <button
+                            key={p}
+                            type="button"
+                            className="source-page-jump-btn"
+                            onClick={() => onJumpPage(p)}
+                            title={`Jump to page ${p}`}
+                          >
+                            Page {p}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 3. Grouped ID Document Cards */}
       <div className="id-doc-groups">
         {groups.map(({ key, title, emptyText }) => {
           const items: IdentificationDocumentItem[] = idDocs?.grouped_documents?.[key] ?? idDocs?.[key] ?? [];
@@ -1397,6 +1558,12 @@ function IdentificationDocumentsSection({
                   {items.map((item, idx) => {
                     const roleKey = (item.party_role || "Unknown").toLowerCase();
                     const confKey = (item.confidence || "medium").toLowerCase();
+                    const verStatus = item.name_verification?.status ?? (
+                      item.deed_name && item.holder_name
+                        ? (item.deed_name.trim().toLowerCase() === item.holder_name.trim().toLowerCase() ? "exact_match" : "unverified")
+                        : "unverified"
+                    );
+
                     return (
                       <div className="id-doc-card" key={`${key}-${item.id_number ?? "none"}-${idx}`}>
                         <div className="id-doc-card-header">
@@ -1412,11 +1579,49 @@ function IdentificationDocumentsSection({
                             {humanize(confKey)} confidence
                           </span>
                         </div>
-                        <div className="id-doc-card-meta">
-                          <div className="sda-field">
-                            <span className="sda-label">Holder Name</span>
-                            <span className="sda-val">{item.holder_name || "Not extracted"}</span>
+
+                        {/* Name Verification Block */}
+                        <div className="id-name-verification-card">
+                          <div className="id-name-verification-header">
+                            <span className="id-name-verification-title">Party Name Verification</span>
+                            {verStatus === "exact_match" && (
+                              <span className="id-name-badge exact-match">Name Matched</span>
+                            )}
+                            {verStatus === "minor_variation" && (
+                              <span className="id-name-badge minor-variation">Minor Name Difference</span>
+                            )}
+                            {verStatus === "mismatch" && (
+                              <span className="id-name-badge mismatch">Name Mismatch</span>
+                            )}
+                            {verStatus === "unverified" && (
+                              <span className="id-name-badge unverified">Name Unverified</span>
+                            )}
                           </div>
+
+                          <div className="id-name-comparison-grid">
+                            <div className="id-name-cell">
+                              <span className="id-name-label">Name in Gift Deed</span>
+                              <span className="id-name-val deed">
+                                {item.name_verification?.deed_name || item.deed_name || "Not linked"}
+                              </span>
+                            </div>
+                            <div className="id-name-cell">
+                              <span className="id-name-label">Name on ID Document</span>
+                              <span className="id-name-val id">
+                                {item.name_verification?.id_holder_name || item.holder_name || "Not found on ID"}
+                              </span>
+                            </div>
+                          </div>
+
+                          {item.name_verification?.discrepancy_reason && (
+                            <div className="id-doc-discrepancy-callout">
+                              <strong>Discrepancy Note:</strong> {item.name_verification.discrepancy_reason}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* ID Document Details & Metadata */}
+                        <div className="id-doc-card-meta">
                           <div className="sda-field">
                             <span className="sda-label">ID Number</span>
                             <span className="sda-val">
@@ -1450,6 +1655,7 @@ function IdentificationDocumentsSection({
                             </div>
                           </div>
                         </div>
+
                         <div className="id-doc-snippet">
                           <b>OCR Evidence:</b> <span>{item.evidence_snippet || "N/A"}</span>
                         </div>

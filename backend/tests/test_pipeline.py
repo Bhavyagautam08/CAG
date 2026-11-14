@@ -20,6 +20,7 @@ from backend.app.processing import (
     assess_stamp_duty_article_34,
     check_donor_donee_surname_risk,
     classify_text,
+    compare_deed_and_id_name,
     evaluate_article_34_relationship,
     extract_directional_relationship,
     extract_fields,
@@ -2626,6 +2627,9 @@ def test_extract_identification_documents_inline_recitals_and_grouping():
         "id_sub_type",
         "id_number",
         "holder_name",
+        "holder_name_source",
+        "deed_name",
+        "name_verification",
         "party_role",
         "dob_or_age",
         "page_numbers",
@@ -2872,6 +2876,196 @@ def test_extract_identification_documents_handles_multiline_ocr_noise_and_witnes
     assert aadhaars["XXXX-XXXX-7288"]["holder_name"] == "Hemanshu Ganvantohai Darii"
     assert aadhaars["XXXX-XXXX-7288"]["dob_or_age"] == "23/08/1987"
     assert aadhaars["XXXX-XXXX-4296"]["holder_name"] is None
+
+
+def test_identification_documents_name_comparison_exact_match():
+    # Direct comparison test
+    direct = compare_deed_and_id_name("Shri Sharma Rajesh Kumar", "RAJESH KUMAR SHARMA")
+    assert direct["status"] == "exact_match"
+    assert direct["flagged"] is False
+    assert direct["discrepancy_reason"] == "Exact token match (surname/given name order differs between Gift Deed and ID)"
+
+    # Full pipeline test with relational tail
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Shri Sharma Rajesh Kumar, S/o Venkat Sharma, aged 60 years\n"
+            "Donee: Anita Sharma, aged 32 years\n"
+            "WHEREAS the Donor gifts the residential property to Donee.",
+        ),
+        (
+            2,
+            "INCOME TAX DEPARTMENT\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "RAJESH KUMAR SHARMA\n"
+            "Date of Birth\n"
+            "10/05/1964",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    assert grouped["summary_counts"]["pan_card"] == 1
+    pan_doc = grouped["pan_card"][0]
+    assert pan_doc["party_role"] == "Donor"
+    assert pan_doc["id_number"] == "ABCDE1234F"
+    assert pan_doc["holder_name"] == "RAJESH KUMAR SHARMA"
+    assert pan_doc["deed_name"] == "Shri Sharma Rajesh Kumar"
+
+    ver = pan_doc["name_verification"]
+    assert ver["status"] == "exact_match"
+    assert ver["flagged"] is False
+    assert ver["severity"] == "none"
+    assert ver["deed_name"] == "Shri Sharma Rajesh Kumar"
+    assert ver["id_holder_name"] == "RAJESH KUMAR SHARMA"
+    assert "Exact token match" in (ver["discrepancy_reason"] or "")
+
+
+def test_identification_documents_name_comparison_minor_variation():
+    # Case A: Initials used on ID vs expanded name in Gift Deed
+    res_initials = compare_deed_and_id_name("Smt. Kavita Ajay Deshmukh", "KAVITA A DESHMUKH")
+    assert res_initials["status"] == "minor_variation"
+    assert res_initials["flagged"] is True
+    assert res_initials["severity"] == "warning"
+    assert res_initials["discrepancy_reason"]
+    assert "Initial" in res_initials["discrepancy_reason"]
+
+    # Case B: Middle name omitted on ID
+    res_omitted = compare_deed_and_id_name("Smt. Kavita Ajay Deshmukh", "KAVITA DESHMUKH")
+    assert res_omitted["status"] == "minor_variation"
+    assert res_omitted["flagged"] is True
+    assert res_omitted["severity"] == "warning"
+    assert res_omitted["discrepancy_reason"]
+    assert "AJAY" in res_omitted["discrepancy_reason"]
+
+    # Pipeline test
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Smt. Kavita Ajay Deshmukh, aged 45 years\n"
+            "Donee: Rahul Deshmukh\n"
+            "WHEREAS the Donor gifts the property.",
+        ),
+        (
+            2,
+            "INCOME TAX DEPARTMENT\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "KAVITA A DESHMUKH\n"
+            "Date of Birth\n"
+            "12/08/1979",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    pan = grouped["pan_card"][0]
+    assert pan["party_role"] == "Donor"
+    assert pan["name_verification"]["status"] == "minor_variation"
+    assert pan["name_verification"]["flagged"] is True
+    assert pan["name_verification"]["discrepancy_reason"]
+    assert grouped["name_verification_summary"]["minor_variation_count"] == 1
+    assert grouped["name_verification_summary"]["has_discrepancies"] is True
+    assert len(grouped["name_verification_summary"]["flagged_discrepancies"]) == 1
+
+
+def test_identification_documents_name_comparison_mismatch_aadhaar():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Kulkarni, aged 60 years\n"
+            "Donee: Smt. Priya Menon, aged 28 years\n"
+            "WHEREAS the Donor conveys and gifts the residential flat to the Donee.",
+        ),
+        (
+            2,
+            "GOVERNMENT OF INDIA\n"
+            "Unique Identification Authority of India\n"
+            "PRIYA NAIR\n"
+            "Aadhaar [Aadhaar Redacted]\n"
+            "DOB: 12/04/1996",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    assert len(grouped["aadhaar_card"]) == 1
+    aadhaar = grouped["aadhaar_card"][0]
+
+    assert aadhaar["party_role"] == "Donee"
+    assert aadhaar["holder_name"] == "PRIYA NAIR"
+    assert aadhaar["deed_name"] == "Smt. Priya Menon"
+    assert aadhaar["id_number"] == "[Aadhaar Redacted]"
+
+    ver = aadhaar["name_verification"]
+    assert ver["status"] == "mismatch"
+    assert ver["flagged"] is True
+    assert ver["severity"] == "high"
+    assert "MENON" in ver["discrepancy_reason"]
+    assert "NAIR" in ver["discrepancy_reason"]
+
+    summary = grouped["name_verification_summary"]
+    assert summary["mismatch_count"] == 1
+    assert summary["has_discrepancies"] is True
+    assert len(summary["flagged_discrepancies"]) == 1
+    flagged = summary["flagged_discrepancies"][0]
+    assert flagged["doc_type"] == "aadhaar_card"
+    assert flagged["party_role"] == "Donee"
+    assert flagged["deed_name"] == "Smt. Priya Menon"
+    assert flagged["id_holder_name"] == "PRIYA NAIR"
+    assert flagged["status"] == "mismatch"
+    assert flagged["id_number"] == "[Aadhaar Redacted]"
+
+
+def test_identification_documents_multipage_deduplication_preservation():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Registration Ref: REG-2026-MULTI-01\n"
+            "Donor: Shri Rameshwar Rao holding PAN ABCDE1234F, aged 62 years\n"
+            "Donee: Suresh Rao, aged 30 years\n"
+            "WHEREAS the Donor gifts the property.",
+        ),
+        (
+            2,
+            "Schedule of Property: Residential Flat No 4, Pune Municipal Corporation.",
+        ),
+        (
+            3,
+            "In witness whereof the parties have signed on this deed.",
+        ),
+        (
+            4,
+            "INCOME TAX DEPARTMENT\n"
+            "GOVT OF INDIA\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "RAMESH RAO\n"
+            "Date of Birth\n"
+            "15/06/1962",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    assert grouped["summary_counts"]["pan_card"] == 1
+    pan = grouped["pan_card"][0]
+
+    # Deduplicated record must retain BOTH deed_name and id_holder_name separately
+    assert pan["deed_name"] == "Shri Rameshwar Rao"
+    assert pan["holder_name"] == "RAMESH RAO"
+    assert pan["holder_name_source"] == "id_document"
+    assert pan["party_role"] == "Donor"
+    assert pan["id_number"] == "ABCDE1234F"
+    assert pan["page_numbers"] == [1, 4]
+
+    # Verify difference is flagged and not overwritten
+    ver = pan["name_verification"]
+    assert ver["status"] == "minor_variation"
+    assert ver["flagged"] is True
+    assert ver["deed_name"] == "Shri Rameshwar Rao"
+    assert ver["id_holder_name"] == "RAMESH RAO"
+    assert "RAMESHWAR" in ver["discrepancy_reason"]
 
 
 

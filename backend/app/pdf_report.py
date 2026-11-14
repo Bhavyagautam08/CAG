@@ -10,10 +10,12 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pypdf import PdfReader
 from reportlab.lib.colors import HexColor, white
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
+from reportlab.platypus import Paragraph, Table, TableStyle
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -45,6 +47,10 @@ MUTED = HexColor("#607086")
 ACCENT = HexColor("#2458a6")
 RED = HexColor("#b42318")
 RED_BACKGROUND = HexColor("#fff0ee")
+AMBER = HexColor("#b45309")
+AMBER_BG = HexColor("#fef3c7")
+ROSE_BG = HexColor("#fee2e2")
+GREEN = HexColor("#15803d")
 MAX_FIELD_LINES_PER_SHEET = 50
 
 
@@ -780,9 +786,25 @@ def _draw_stamp_duty_assessment(
     return y
 
 
-def _parse_id_documents_for_report(assessment: Any) -> dict[str, list[dict[str, Any]]]:
-    empty: dict[str, list[dict[str, Any]]] = {"pan_card": [], "aadhaar_card": [], "other_id": []}
-    raw = getattr(assessment, "identification_documents", None)
+def _parse_id_documents_for_report(assessment: Any) -> dict[str, Any]:
+    empty: dict[str, Any] = {
+        "pan_card": [],
+        "aadhaar_card": [],
+        "other_id": [],
+        "deed_parties": [],
+        "name_verification_summary": {
+            "total_evaluated": 0,
+            "exact_match_count": 0,
+            "minor_variation_count": 0,
+            "mismatch_count": 0,
+            "unverified_count": 0,
+            "has_discrepancies": False,
+            "flagged_discrepancies": [],
+        },
+    }
+    raw = getattr(assessment, "extracted_id_documents_json", None) or getattr(
+        assessment, "identification_documents", None
+    )
     data: Any = raw
     if isinstance(raw, str) and raw.strip().startswith("{"):
         try:
@@ -792,11 +814,101 @@ def _parse_id_documents_for_report(assessment: Any) -> dict[str, list[dict[str, 
     if not isinstance(data, dict):
         return empty
     grouped_src = data.get("grouped_documents") if isinstance(data.get("grouped_documents"), dict) else data
+    pan_list = list(grouped_src.get("pan_card") or data.get("pan_card") or [])
+    aadhaar_list = list(grouped_src.get("aadhaar_card") or data.get("aadhaar_card") or [])
+    other_list = list(grouped_src.get("other_id") or data.get("other_id") or [])
+    all_items = [*pan_list, *aadhaar_list, *other_list]
+
+    summary = data.get("name_verification_summary")
+    if not isinstance(summary, dict) or "total_evaluated" not in summary:
+        total_eval = len(all_items)
+        exact_c = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "exact_match")
+        minor_c = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "minor_variation")
+        mis_c = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "mismatch")
+        unver_c = sum(1 for it in all_items if it.get("name_verification", {}).get("status") == "unverified")
+        flagged = [
+            {
+                "doc_type": it.get("doc_type"),
+                "id_sub_type": it.get("id_sub_type"),
+                "id_number": it.get("id_number"),
+                "party_role": it.get("party_role"),
+                "deed_name": it.get("name_verification", {}).get("deed_name") or it.get("deed_name"),
+                "id_holder_name": it.get("name_verification", {}).get("id_holder_name") or it.get("holder_name"),
+                "status": it.get("name_verification", {}).get("status"),
+                "severity": it.get("name_verification", {}).get("severity"),
+                "discrepancy_reason": it.get("name_verification", {}).get("discrepancy_reason"),
+                "page_numbers": it.get("page_numbers", []),
+            }
+            for it in all_items
+            if it.get("name_verification", {}).get("flagged")
+        ]
+        summary = {
+            "total_evaluated": total_eval,
+            "exact_match_count": exact_c,
+            "minor_variation_count": minor_c,
+            "mismatch_count": mis_c,
+            "unverified_count": unver_c,
+            "has_discrepancies": bool(minor_c > 0 or mis_c > 0),
+            "flagged_discrepancies": flagged,
+        }
+
     return {
-        "pan_card": list(grouped_src.get("pan_card") or data.get("pan_card") or []),
-        "aadhaar_card": list(grouped_src.get("aadhaar_card") or data.get("aadhaar_card") or []),
-        "other_id": list(grouped_src.get("other_id") or data.get("other_id") or []),
+        "pan_card": pan_list,
+        "aadhaar_card": aadhaar_list,
+        "other_id": other_list,
+        "deed_parties": list(data.get("deed_parties") or []),
+        "name_verification_summary": summary,
     }
+
+
+def _draw_id_report_table(
+    report_canvas: canvas.Canvas,
+    x: float,
+    y: float,
+    max_width: float,
+    header_row: list[Any],
+    data_rows: list[list[Any]],
+    col_widths: list[float],
+    row_bg_colors: list[Any],
+    continue_panel_fn: Any,
+    section_title: str,
+) -> float:
+    if not data_rows:
+        return y
+
+    idx = 0
+    while idx < len(data_rows):
+        take = len(data_rows) - idx
+        while take > 0:
+            sub_rows = [header_row] + data_rows[idx : idx + take]
+            t = Table(sub_rows, colWidths=col_widths)
+            t_styles = [
+                ("BACKGROUND", (0, 0), (-1, 0), HexColor("#1e293b")),
+                ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 2.0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.0),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2.0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2.0),
+            ]
+            for r_i, bg in enumerate(row_bg_colors[idx : idx + take], start=1):
+                if bg:
+                    t_styles.append(("BACKGROUND", (0, r_i), (-1, r_i), bg))
+            t.setStyle(TableStyle(t_styles))
+            w, h = t.wrapOn(report_canvas, max_width, PAGE_HEIGHT)
+            if y - h >= 57 or take == 1:
+                break
+            take -= 1
+
+        if y - h < 57:
+            y = continue_panel_fn(f"{section_title} (continued)")
+            continue
+
+        t.drawOn(report_canvas, x, y - h)
+        y -= (h + 5)
+        idx += take
+
+    return y
 
 
 def _draw_identification_documents(
@@ -809,86 +921,242 @@ def _draw_identification_documents(
     continue_panel_fn: Any,
 ) -> float:
     id_docs = _parse_id_documents_for_report(assessment)
+    summary = id_docs.get("name_verification_summary") or {}
+    has_discrepancies = bool(summary.get("has_discrepancies"))
+    flagged_discrepancies = list(summary.get("flagged_discrepancies") or [])
+
     if y - 42 < 57:
         y = continue_panel_fn("Extracted Identification Documents")
     else:
         y -= 4
     y = _draw_section(report_canvas, x, y, "Extracted Identification Documents")
 
+    styles = getSampleStyleSheet()
+    th_style = ParagraphStyle(
+        "IdTableHeader",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=5.8,
+        leading=7.2,
+        textColor=white,
+    )
+    td_style = ParagraphStyle(
+        "IdTableCell",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=5.6,
+        leading=7.0,
+        textColor=INK,
+    )
+
+    # 1. Summary line at start of Extracted Identification Documents section
+    summary_text = (
+        f"Name Verification Summary: Exact Matches: {summary.get('exact_match_count', 0)} | "
+        f"Minor Variations: {summary.get('minor_variation_count', 0)} | "
+        f"Mismatches: {summary.get('mismatch_count', 0)} | "
+        f"Unverified: {summary.get('unverified_count', 0)}"
+    )
+    summary_box_height = 18
+    if y - summary_box_height < 57:
+        y = continue_panel_fn("Extracted Identification Documents (continued)")
+
+    report_canvas.setFillColor(HexColor("#fef3c7") if has_discrepancies else HexColor("#f0f4f9"))
+    report_canvas.roundRect(x, y - summary_box_height + 3, max_width, summary_box_height, 3, fill=1, stroke=0)
+    report_canvas.setFillColor(AMBER if has_discrepancies else ACCENT)
+    report_canvas.setFont("Helvetica-Bold", 7.0)
+    report_canvas.drawString(x + 6, y - 9, summary_text, shaping=True)
+    y -= summary_box_height + 8
+
+    # 2. Flagged Name Discrepancies Table (if has_discrepancies and flagged_discrepancies)
+    if has_discrepancies and flagged_discrepancies:
+        if y - 32 < 57:
+            y = continue_panel_fn("Flagged Name Discrepancies (continued)")
+
+        has_mismatch = any(d.get("status") == "mismatch" for d in flagged_discrepancies)
+        report_canvas.setFillColor(RED if has_mismatch else AMBER)
+        report_canvas.setFont("Helvetica-Bold", 8.0)
+        report_canvas.drawString(x, y, "Flagged Name Discrepancies (Gift Deed vs. ID Document)", shaping=True)
+        y -= 13
+
+        disc_headers = [
+            Paragraph("Party Role", th_style),
+            Paragraph("ID Document", th_style),
+            Paragraph("Name in Gift Deed", th_style),
+            Paragraph("Name on ID", th_style),
+            Paragraph("Flag Status", th_style),
+            Paragraph("Discrepancy Details", th_style),
+        ]
+        disc_col_widths = [42, 48, 64, 64, 50, 86]
+        disc_rows: list[list[Any]] = []
+        disc_bg_colors: list[Any] = []
+
+        for d_item in flagged_discrepancies:
+            p_role = str(d_item.get("party_role") or "Unknown")
+            sub = str(d_item.get("id_sub_type") or d_item.get("doc_type") or "").replace("_", " ").title()
+            num = str(d_item.get("id_number") or "")
+            if "aadhaar" in sub.lower() or "aadhaar" in str(d_item.get("doc_type", "")).lower():
+                if num and num != "[Aadhaar Redacted]" and re.search(r"\d{4}$", num):
+                    last4 = re.search(r"\d{4}$", num).group(0)
+                    num = f"[Aadhaar Redacted]<br/>(XXXX-XXXX-{last4})"
+                else:
+                    num = "[Aadhaar Redacted]"
+            id_doc_label = f"<b>{sub}</b>" + (f"<br/><font size=\"5.0\" color=\"#475569\">{num}</font>" if num else "")
+
+            deed_n = str(d_item.get("deed_name") or "—")
+            id_n = str(d_item.get("id_holder_name") or "—")
+            status = str(d_item.get("status") or "").lower()
+            reason = str(d_item.get("discrepancy_reason") or "Discrepancy detected")
+
+            if status == "mismatch":
+                status_label = "<font color=\"#b91c1c\"><b>MISMATCH</b></font>"
+                bg_color = HexColor("#fee2e2")
+            else:
+                status_label = "<font color=\"#b45309\"><b>MINOR VARIATION</b></font>"
+                bg_color = HexColor("#fef3c7")
+
+            disc_rows.append(
+                [
+                    Paragraph(p_role, td_style),
+                    Paragraph(id_doc_label, td_style),
+                    Paragraph(deed_n, td_style),
+                    Paragraph(id_n, td_style),
+                    Paragraph(status_label, td_style),
+                    Paragraph(reason, td_style),
+                ]
+            )
+            disc_bg_colors.append(bg_color)
+
+        y = _draw_id_report_table(
+            report_canvas,
+            x,
+            y,
+            max_width,
+            disc_headers,
+            disc_rows,
+            disc_col_widths,
+            disc_bg_colors,
+            continue_panel_fn,
+            "Flagged Name Discrepancies",
+        )
+        y -= 6
+
+    # 3. Grouped ID Tables (PAN, Aadhaar, Other ID)
     groups: tuple[tuple[str, str], ...] = (
         ("pan_card", "PAN Card Details"),
         ("aadhaar_card", "Aadhaar Card Details"),
         ("other_id", "Other Identification Documents"),
     )
-
-    inner_width = max_width - 14
-    font_size = 7.3
-    leading = 9.8
+    grp_col_widths = [30, 68, 118, 46, 54, 38]
 
     for group_key, group_title in groups:
         items = id_docs.get(group_key) or []
-        if y - 34 < 57:
+        if y - 30 < 57:
             y = continue_panel_fn("Extracted Identification Documents (continued)")
 
         report_canvas.setFillColor(ACCENT)
-        report_canvas.setFont("Helvetica-Bold", 8)
+        report_canvas.setFont("Helvetica-Bold", 8.0)
         report_canvas.drawString(x, y, group_title, shaping=True)
-        y -= 13
+        y -= 12
 
         if not items:
             empty_msg = f"No {group_title} detected"
-            empty_height = 22
+            empty_height = 20
             if y - empty_height < 57:
                 y = continue_panel_fn("Extracted Identification Documents (continued)")
             report_canvas.setFillColor(white)
-            report_canvas.roundRect(x, y - empty_height + 3, max_width, empty_height, 4, fill=1, stroke=0)
+            report_canvas.roundRect(x, y - empty_height + 3, max_width, empty_height, 3, fill=1, stroke=0)
             report_canvas.setFillColor(MUTED)
-            report_canvas.setFont(font_name, 7.5)
-            report_canvas.drawString(x + 7, y - 12, empty_msg, shaping=True)
-            y -= empty_height + 5
+            report_canvas.setFont(font_name, 7.0)
+            report_canvas.drawString(x + 7, y - 11, empty_msg, shaping=True)
+            y -= empty_height + 6
             continue
 
-        for item in items:
-            party_role = str(item.get("party_role") or "Unknown")
-            holder_name = str(item.get("holder_name") or "Not extracted")
-            id_number = str(item.get("id_number") or "Not extracted")
-            id_sub_type = str(item.get("id_sub_type") or "").replace("_", " ").strip()
-            if group_key == "other_id" and id_sub_type:
-                id_display = f"{id_number} ({id_sub_type.title()})"
+        grp_headers = [
+            Paragraph("Party Role", th_style),
+            Paragraph("Name in Gift Deed", th_style),
+            Paragraph("Name on ID", th_style),
+            Paragraph("Name Check", th_style),
+            Paragraph("ID Number / Ref", th_style),
+            Paragraph("Page(s) & Conf", th_style),
+        ]
+        grp_rows: list[list[Any]] = []
+        grp_bg_colors: list[Any] = []
+
+        for row_idx, item in enumerate(items):
+            p_role = str(item.get("party_role") or "Unknown")
+            deed_n = str(item.get("deed_name") or "—")
+            id_n = str(item.get("holder_name") or "—")
+
+            ver = item.get("name_verification") or {}
+            ver_status = str(ver.get("status") or "unverified").lower()
+            ver_reason = str(ver.get("discrepancy_reason") or "")
+
+            if ver_status == "exact_match":
+                check_label = "<font color=\"#15803d\"><b>Exact Match</b></font>"
+                bg_col = white if row_idx % 2 == 0 else HexColor("#f8fafc")
+            elif ver_status == "minor_variation":
+                check_label = "<font color=\"#b45309\"><b>Minor Variation</b></font>"
+                if ver_reason:
+                    short_r = (ver_reason[:42] + "...") if len(ver_reason) > 45 else ver_reason
+                    check_label += f"<br/><font size=\"4.8\" color=\"#475569\">{short_r}</font>"
+                bg_col = HexColor("#fffbeb")
+            elif ver_status == "mismatch":
+                check_label = "<font color=\"#b91c1c\"><b>Mismatch</b></font>"
+                if ver_reason:
+                    short_r = (ver_reason[:42] + "...") if len(ver_reason) > 45 else ver_reason
+                    check_label += f"<br/><font size=\"4.8\" color=\"#b91c1c\">{short_r}</font>"
+                bg_col = HexColor("#fee2e2")
             else:
-                id_display = id_number
-            raw_pages = item.get("page_numbers") or []
-            pages_str = ", ".join(str(p) for p in raw_pages) if raw_pages else "N/A"
+                check_label = "<font color=\"#64748b\">Unverified</font>"
+                bg_col = white if row_idx % 2 == 0 else HexColor("#f8fafc")
+
+            id_raw = str(item.get("id_number") or "")
+            if group_key == "aadhaar_card":
+                if id_raw and id_raw != "[Aadhaar Redacted]" and re.search(r"\d{4}$", id_raw):
+                    last4 = re.search(r"\d{4}$", id_raw).group(0)
+                    id_display = f"[Aadhaar Redacted]<br/>(XXXX-XXXX-{last4})"
+                else:
+                    id_display = "[Aadhaar Redacted]"
+            elif group_key == "other_id":
+                sub_label = str(item.get("id_sub_type") or "").replace("_", " ").title()
+                id_display = f"{id_raw} ({sub_label})" if sub_label and id_raw else (id_raw or sub_label or "—")
+            else:
+                id_display = id_raw or "—"
+
             dob_or_age = item.get("dob_or_age")
-            dob_suffix = f"  |  DOB/Age: {dob_or_age}" if dob_or_age else ""
+            if dob_or_age:
+                id_display += f"<br/><font size=\"5.0\" color=\"#64748b\">DOB/Age: {dob_or_age}</font>"
 
-            styled_lines: list[tuple[str, Any, bool]] = []
-            for line in _wrap(f"Party Role: {party_role}  |  ID Number: {id_display}", font_name, font_size, inner_width):
-                styled_lines.append((line, INK, True))
-            for line in _wrap(f"Holder Name: {holder_name}  |  Page(s): {pages_str}{dob_suffix}", font_name, font_size, inner_width):
-                styled_lines.append((line, INK, False))
+            raw_pages = item.get("page_numbers") or []
+            pages_str = ", ".join(str(p) for p in raw_pages) if raw_pages else "—"
+            conf = str(item.get("confidence") or "").title()
+            page_conf_str = f"p. {pages_str}" + (f"<br/><font size=\"5.0\" color=\"#64748b\">{conf}</font>" if conf else "")
 
-            idx = 0
-            while idx < len(styled_lines):
-                avail_lines = max(1, int((y - 57 - 12) // leading))
-                remaining = len(styled_lines) - idx
-                if remaining <= 24 and remaining > avail_lines:
-                    y = continue_panel_fn("Extracted Identification Documents (continued)")
-                    avail_lines = max(1, int((y - 57 - 12) // leading))
+            grp_rows.append(
+                [
+                    Paragraph(p_role, td_style),
+                    Paragraph(deed_n, td_style),
+                    Paragraph(id_n, td_style),
+                    Paragraph(check_label, td_style),
+                    Paragraph(id_display, td_style),
+                    Paragraph(page_conf_str, td_style),
+                ]
+            )
+            grp_bg_colors.append(bg_col)
 
-                take = min(remaining, max(1, min(avail_lines, MAX_FIELD_LINES_PER_SHEET)))
-                chunk = styled_lines[idx:idx + take]
-                block_height = max(24, len(chunk) * leading + 10)
-                if y - block_height < 57:
-                    y = continue_panel_fn("Extracted Identification Documents (continued)")
-                report_canvas.setFillColor(white)
-                report_canvas.roundRect(x, y - block_height + 3, max_width, block_height, 4, fill=1, stroke=0)
-                for line_idx, (line_text, color, _is_head) in enumerate(chunk):
-                    report_canvas.setFillColor(color)
-                    report_canvas.setFont(font_name, font_size)
-                    report_canvas.drawString(x + 7, y - 11 - line_idx * leading, line_text, shaping=True)
-                y -= block_height + 4
-                idx += take
+        y = _draw_id_report_table(
+            report_canvas,
+            x,
+            y,
+            max_width,
+            grp_headers,
+            grp_rows,
+            grp_col_widths,
+            grp_bg_colors,
+            continue_panel_fn,
+            group_title,
+        )
+        y -= 6
 
     return y
 
