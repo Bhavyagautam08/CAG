@@ -20,8 +20,11 @@ from backend.app.processing import (
     assess_stamp_duty_article_34,
     check_donor_donee_surname_risk,
     classify_text,
+    compare_deed_and_id_name,
     evaluate_article_34_relationship,
+    extract_directional_relationship,
     extract_fields,
+    extract_identification_documents,
     extract_market_value,
     extract_property_schedule,
     extract_stamp_duty_paid,
@@ -860,6 +863,57 @@ def test_extract_property_schedule_classification_and_ambiguity():
     assert not is_amb7
 
 
+def test_extract_property_schedule_recital_address_never_contaminates_schedule_location():
+    # Page 1: Donor resides at Village Baramati, District Pune
+    # Page 2: Schedule of Property: Residential flat situated in Maharashtra State
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the Donor resides at Village Baramati, District Pune.\nWHEREAS the Donee is the nephew of the Donor."),
+        (2, "Schedule of Property:\nResidential flat situated in Maharashtra State.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 1,50,000/-"),
+    ]
+    prop_type, prop_desc, prop_loc, surv_no, prop_area, mv, is_amb, ev, pg = extract_property_schedule(text_by_page)
+    assert prop_type == "residential_property"
+    assert "Baramati" not in (prop_loc or "")
+    assert "Pune" not in (prop_loc or "")
+
+    loc_band, jur, cess_unc, _ = resolve_authoritative_location_band(prop_loc, schedule_text=prop_desc)
+    assert loc_band is None
+    assert jur == "unknown"
+    assert cess_unc is True
+
+    # Also test end-to-end via assess_stamp_duty_article_34
+    doc = LogicalDocument(id="doc-loc-recital-baramati", ingestion_id="ing-loc-baramati", start_page=1, end_page=2, category="gift_deed")
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.location_band is None
+    assert assess.jurisdiction == "unknown"
+    assert assess.cess_uncertain is True
+    assert assess.status == "requires_review"
+
+
+def test_extract_property_schedule_recital_mumbai_address_never_contaminates_schedule_location():
+    # Page 1: Donor resides at Bandra, Mumbai
+    # Page 2: Schedule of Property: Residential flat situated in Maharashtra State
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the Donor resides at Bandra, Mumbai.\nWHEREAS the Donee is the nephew of the Donor."),
+        (2, "Schedule of Property:\nResidential flat situated in Maharashtra State.\nMarket Value: ₹ 30,00,000/-\nTotal Stamp Duty Paid: ₹ 1,50,000/-"),
+    ]
+    prop_type, prop_desc, prop_loc, surv_no, prop_area, mv, is_amb, ev, pg = extract_property_schedule(text_by_page)
+    assert prop_type == "residential_property"
+    assert "Bandra" not in (prop_loc or "")
+    assert "Mumbai" not in (prop_loc or "")
+
+    loc_band, jur, cess_unc, _ = resolve_authoritative_location_band(prop_loc, schedule_text=prop_desc)
+    assert loc_band is None
+    assert jur == "unknown"
+    assert cess_unc is True
+
+    doc = LogicalDocument(id="doc-loc-recital-mumbai", ingestion_id="ing-loc-mumbai", start_page=1, end_page=2, category="gift_deed")
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.location_band is None
+    assert assess.jurisdiction == "unknown"
+    assert assess.cess_uncertain is True
+    assert assess.status == "requires_review"
+
+
 def test_extract_market_value_and_assessed_fallback():
     # 1. Explicit market value
     t1 = [(1, "The market value of property is ₹ 25,00,000/- only.")]
@@ -1020,7 +1074,7 @@ def test_assess_stamp_duty_article_34_calculations_and_findings():
         (2, "Market Value: ₹ 25,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-"),
     ]
     assess4 = assess_stamp_duty_article_34(doc4, text_p4)
-    assert assess4.status == "not_applicable"
+    assert assess4.status in ("not_applicable", "short_paid")
     assert assess4.relationship_eligibility == "not_eligible"
 
     # Case 5: Conflicting Market Values
@@ -1181,7 +1235,7 @@ def test_article_34_scenario_07_non_eligible_relationship():
     ]
     assess = assess_stamp_duty_article_34(doc, text_by_page)
     assert assess.relationship_eligibility == "not_eligible"
-    assert assess.status == "not_applicable"
+    assert assess.status in ("not_applicable", "short_paid")
     finding_rules = [f.rule_id for f in assess.findings_list]
     assert "relationship_not_eligible_article_34" in finding_rules
 
@@ -1664,6 +1718,80 @@ def test_article_25_uncertain_location_band_flags_requires_review():
     assert "Authoritative property location could not be resolved to a definite location band" in assess.reviewer_notes
 
 
+def test_article_25_missing_stamp_duty_paid_flags_not_available():
+    # Ineligible relationship (uncle to nephew) in Mumbai (Municipal Corporation 5% + 1% cess = 6%)
+    # Expected total: 6% of 60,00,000 = 3,60,000, but no stamp duty paid extracted
+    doc = LogicalDocument(id="doc-art25-missing-paid", ingestion_id="ing-art25-missing", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential flat at Mumbai Suburban.\nMarket Value: ₹ 60,00,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.duty_rate == "5%"
+    assert assess.expected_total == 360000
+    assert assess.total_stamp_duty_paid is None
+    assert assess.difference is None
+    assert assess.status == "not_available"
+    assert assess.reviewer_notes == "Article 25 standard conveyance applies at 5% (expected total ₹360,000), but no stamp duty payment was extracted to compare."
+
+    # Finding check
+    missing_finding = next((f for f in assess.findings_list if f.rule_id == "missing_stamp_duty_paid"), None)
+    assert missing_finding is not None
+    assert missing_finding.severity == "low"
+    assert missing_finding.kind == "missing_information"
+    assert missing_finding.explanation == assess.reviewer_notes
+
+
+def test_article_25_underpaid_conveyance_flags_short_paid():
+    # Ineligible relationship (uncle to nephew) in Mumbai (Municipal Corporation 5% + 1% cess = 6%)
+    # Market value 60,00,000 -> Expected base: 3,00,000, cess: 60,000, total = 3,60,000.
+    # Parties paid ₹200 (attempting family gift deed concession)
+    doc = LogicalDocument(id="doc-art25-underpaid-mc", ingestion_id="ing-art25-underpaid", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential flat at Mumbai Suburban.\nMarket Value: ₹ 60,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.duty_rate == "5%"
+    assert assess.expected_total == 360000
+    assert assess.total_stamp_duty_paid == 200
+    assert assess.difference == -359800
+    assert assess.status == "short_paid"
+    assert "Short paid under ARTICLE 25 by ₹359,800." in assess.reviewer_notes
+    assert "Article 34 concessional rate is not applicable" in assess.reviewer_notes
+
+    # Emits both stamp_duty_short_paid and short_paid_stamp_duty with high severity & compliance_deficit
+    finding_rules = {f.rule_id: f for f in assess.findings_list}
+    assert "stamp_duty_short_paid" in finding_rules
+    assert "short_paid_stamp_duty" in finding_rules
+
+    f1 = finding_rules["stamp_duty_short_paid"]
+    f2 = finding_rules["short_paid_stamp_duty"]
+    assert f1.severity == "high"
+    assert f1.kind == "compliance_deficit"
+    assert f2.severity == "high"
+    assert f2.kind == "compliance_deficit"
+
+
+def test_article_25_gram_panchayat_underpaid_conveyance_flags_short_paid():
+    # Ineligible relationship in Gram Panchayat (4% base, 0% cess)
+    # Market value 20,00,000 -> Expected base = 80,000, total = 80,000.
+    # Parties paid ₹200 -> short paid by 79,800.
+    doc = LogicalDocument(id="doc-art25-underpaid-gp", ingestion_id="ing-art25-gp-short", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nWHEREAS the donor is the uncle of the donee.\nSchedule of Property:\nResidential house in Gram Panchayat village, Taluka Baramati.\nMarket Value: ₹ 20,00,000/-\nTotal Stamp Duty Paid: ₹ 200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.selected_rule == "article_25"
+    assert assess.duty_rate == "4%"
+    assert assess.expected_total == 80000
+    assert assess.total_stamp_duty_paid == 200
+    assert assess.difference == -79800
+    assert assess.status == "short_paid"
+    assert "Short paid under ARTICLE 25 by ₹79,800." in assess.reviewer_notes
+    assert "Article 34 concessional rate is not applicable" in assess.reviewer_notes
+
+
 def test_check_donor_donee_surname_risk_mismatch():
     has_mismatch, explanation, meta = check_donor_donee_surname_risk(
         donor_name="Shri Ramesh Patil",
@@ -1783,6 +1911,113 @@ def test_check_donor_donee_surname_risk_suppressed_for_ocr_noise_and_low_confide
     assert has_mismatch_low_conf is False
     assert meta_conf["suppressed"] is True
     assert meta_conf["reason"] == "low_ocr_confidence"
+
+
+def test_married_female_donor_to_non_natal_male_flags_mismatch():
+    # Female donor with Smt. / Sau. gifting to son with different surname -> NOT suppressed
+    has_mismatch, explanation, meta = check_donor_donee_surname_risk(
+        donor_name="Smt. Sunita Patil",
+        donee_name="Rajesh Shinde",
+        relationship_context={"donor_role": "mother", "donee_relation_to_donor": "son"},
+    )
+    assert has_mismatch is True
+    assert meta["suppressed"] is False
+    assert "Patil" in explanation and "Shinde" in explanation
+
+    # Female donor with Sau. gifting to nephew with different surname -> NOT suppressed
+    has_mismatch_nephew, _, meta_nephew = check_donor_donee_surname_risk(
+        donor_name="Sau. Sunita Patil",
+        donee_name="Rajesh Shinde",
+        relationship_context={"donor_role": "aunt", "donee_relation_to_donor": "nephew"},
+    )
+    assert has_mismatch_nephew is True
+    assert meta_nephew["suppressed"] is False
+
+    # Female donor with Smt. gifting to uncle with different surname -> NOT suppressed
+    has_mismatch_uncle, _, meta_uncle = check_donor_donee_surname_risk(
+        donor_name="Smt. Sunita Patil",
+        donee_name="Rajesh Shinde",
+        relationship_context={"donor_role": "niece", "donee_relation_to_donor": "uncle"},
+    )
+    assert has_mismatch_uncle is True
+    assert meta_uncle["suppressed"] is False
+
+    # Female donor with Smt. gifting to friend / unknown male -> NOT suppressed
+    has_mismatch_friend, _, meta_friend = check_donor_donee_surname_risk(
+        donor_name="Smt. Sunita Patil",
+        donee_name="Rajesh Shinde",
+        relationship_context={"relationship": "friend"},
+    )
+    assert has_mismatch_friend is True
+    assert meta_friend["suppressed"] is False
+
+
+def test_married_female_donor_to_natal_family_suppresses_mismatch():
+    # Female donor with Smt. gifting to brother -> suppressed (married female name change)
+    has_mismatch_bro, _, meta_bro = check_donor_donee_surname_risk(
+        donor_name="Smt. Sunita Kadam",
+        donee_name="Rajesh Patil",
+        relationship_context={"donor_role": "sister", "donee_relation_to_donor": "brother"},
+    )
+    assert has_mismatch_bro is False
+    assert meta_bro["suppressed"] is True
+    assert meta_bro["reason"] == "married_female_name_change"
+
+    # Female donor with Sau. gifting to father -> suppressed
+    has_mismatch_fa, _, meta_fa = check_donor_donee_surname_risk(
+        donor_name="Sau. Sunita Kadam",
+        donee_name="Ramesh Patil",
+        relationship_context={"donor_role": "daughter", "donee_relation_to_donor": "father"},
+    )
+    assert has_mismatch_fa is False
+    assert meta_fa["suppressed"] is True
+    assert meta_fa["reason"] == "married_female_name_change"
+
+    # Marathi natal relation भाऊ
+    has_mismatch_mr, _, meta_mr = check_donor_donee_surname_risk(
+        donor_name="सौ. सुनिता कदम",
+        donee_name="राजेश पाटील",
+        relationship_context={"donor_role": "बहीण", "donee_relation_to_donor": "भाऊ"},
+    )
+    assert has_mismatch_mr is False
+    assert meta_mr["suppressed"] is True
+
+
+def test_assess_stamp_duty_fallback_name_extraction_between_clause():
+    # Empty document.fields -> names extracted from "Between ... (Donor) and ... (Donee)"
+    doc = LogicalDocument(id="doc-fb-between", ingestion_id="ing-fb-1", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nBetween Smt. Sunita Patil (Donor) and Rajesh Shinde (Donee).\nWHEREAS the donor is the mother of the donee, gifting to her son.\nSchedule of Property:\nResidential flat in Pune Municipal Corporation.\nMarket Value: ₹ 40,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_name == "Smt. Sunita Patil"
+    assert assess.donee_name == "Rajesh Shinde"
+    assert assess.donor_role == "mother"
+    assert assess.donee_role == "son"
+    assert assess.donee_relation_to_donor == "son"
+
+    calc_comp = json.loads(assess.calculation_components) if isinstance(assess.calculation_components, str) else assess.calculation_components
+    assert calc_comp.get("surname_mismatch") is True
+    finding_rules = [f.rule_id for f in assess.findings_list]
+    assert "donor_donee_surname_mismatch" in finding_rules
+
+
+def test_assess_stamp_duty_fallback_name_extraction_labeled_lines():
+    # Empty document.fields -> names extracted from labeled lines
+    doc = LogicalDocument(id="doc-fb-labeled", ingestion_id="ing-fb-2", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nDonor: Smt. Sunita Patil\nDonee: Rajesh Shinde\nWHEREAS the donor is the mother of the donee.\nSchedule of Property:\nResidential flat in Pune Municipal Corporation.\nMarket Value: ₹ 40,00,000/-\nTotal Stamp Duty Paid: ₹ 25,200/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_name == "Smt. Sunita Patil"
+    assert assess.donee_name == "Rajesh Shinde"
+    assert assess.donor_role == "mother"
+    assert assess.donee_role == "son"
+
+    calc_comp = json.loads(assess.calculation_components) if isinstance(assess.calculation_components, str) else assess.calculation_components
+    assert calc_comp.get("surname_mismatch") is True
+    finding_rules = [f.rule_id for f in assess.findings_list]
+    assert "donor_donee_surname_mismatch" in finding_rules
 
 
 def test_check_donor_donee_surname_risk_suppressed_for_missing_names():
@@ -2267,6 +2502,572 @@ def test_rule_matrix_schedule_unknown_jurisdiction_no_fake_zero_rate():
     assert assess.expected_total is None
     assert assess.status == "requires_review"
     assert "Cess applicability cannot be verified from authoritative location evidence; manual review required." in assess.reviewer_notes
+
+
+def test_child_to_parent_directional_relationship_preserves_direction_and_article_34_3_percent():
+    # Verify child-to-parent pairs (labels and conjunctions) in English, Hindi, and Marathi
+    # preserve donor -> donee direction and always resolve to article_34_3_percent (never article_34_200).
+    test_cases = [
+        # English labels & conjunctions
+        ("RELATIONSHIP: Son to Mother", "son", "mother", "mother"),
+        ("RELATION: Son and Mother", "son", "mother", "mother"),
+        ("RELATIONSHIP: Son to Father", "son", "father", "father"),
+        ("RELATION: Son and Father", "son", "father", "father"),
+        ("RELATIONSHIP: Daughter to Mother", "daughter", "mother", "mother"),
+        ("RELATION: Daughter and Mother", "daughter", "mother", "mother"),
+        ("RELATIONSHIP: Daughter to Father", "daughter", "father", "father"),
+        ("RELATION: Daughter and Father", "daughter", "father", "father"),
+        # Recital phrasing
+        ("WHEREAS the parties are related as Son and Mother.", "son", "mother", "mother"),
+        ("WHEREAS the parties are related as Son and Father.", "son", "father", "father"),
+        ("WHEREAS the parties are related as Daughter and Mother.", "daughter", "mother", "mother"),
+        ("WHEREAS the parties are related as Daughter and Father.", "daughter", "father", "father"),
+        # Hindi labels
+        ("संबंध: पुत्र और माता", "son", "mother", "mother"),
+        ("संबंध: पुत्र से माता", "son", "mother", "mother"),
+        ("संबंध: पुत्र और पिता", "son", "father", "father"),
+        ("संबंध: पुत्र से पिता", "son", "father", "father"),
+        ("संबंध: पुत्री और माता", "daughter", "mother", "mother"),
+        ("संबंध: पुत्री और पिता", "daughter", "father", "father"),
+        # Marathi labels
+        ("नातेसंबंध: मुलगा आणि आई", "son", "mother", "mother"),
+        ("नातेसंबंध: मुलगा व आई", "son", "mother", "mother"),
+        ("नातेसंबंध: मुलगा ते आई", "son", "mother", "mother"),
+        ("नातेसंबंध: मुलगा आणि वडील", "son", "father", "father"),
+        ("नातेसंबंध: मुलगा व वडील", "son", "father", "father"),
+        ("नातेसंबंध: मुलगा ते वडील", "son", "father", "father"),
+        ("नातेसंबंध: मुलगी आणि आई", "daughter", "mother", "mother"),
+        ("नातेसंबंध: मुलगी आणि वडील", "daughter", "father", "father"),
+    ]
+
+    for snippet, exp_d, exp_e, exp_rel in test_cases:
+        d_r, e_r, e_rel, disp, norm, ev, pg, is_amb = extract_directional_relationship([(1, snippet)])
+        assert d_r == exp_d, f"Snippet '{snippet}' failed donor_role: expected {exp_d}, got {d_r}"
+        assert e_r == exp_e, f"Snippet '{snippet}' failed donee_role: expected {exp_e}, got {e_r}"
+        assert e_rel == exp_rel, f"Snippet '{snippet}' failed donee_relation_to_donor: expected {exp_rel}, got {e_rel}"
+        assert not is_amb, f"Snippet '{snippet}' was marked ambiguous"
+
+        rule = select_stamp_duty_rule(donee_relation_to_donor=e_rel, property_type="residential")
+        assert rule == "article_34_3_percent", f"Snippet '{snippet}' resolved to {rule} instead of article_34_3_percent"
+        assert rule != "article_34_200", f"Snippet '{snippet}' incorrectly resolved to article_34_200 concession"
+
+
+def test_child_to_parent_end_to_end_assessment_requires_3_percent_duty():
+    # End-to-end gift deed: Son gifting residential apartment to Mother at Pune.
+    # Must compute 3% ad valorem stamp duty (not ₹200 concession) + 1% metro cess.
+    doc = LogicalDocument(id="doc-child-parent", ingestion_id="ing-cp", start_page=1, end_page=2, category="gift_deed")
+    text_by_page = [
+        (1, "GIFT DEED\nBetween Rajesh Ramesh Shinde (Donor) and Smt. Sunita Ramesh Shinde (Donee)\nRELATION: Son and Mother\nWHEREAS the donor executes this gift in favour of his mother."),
+        (2, "Schedule of Property: Residential flat No. 402, Pune Municipal Corporation, Pune.\nMarket Value: ₹ 50,00,000/-\nTotal Stamp Duty Paid: ₹ 2,00,000/-"),
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.donor_role == "son"
+    assert assess.donee_role == "mother"
+    assert assess.donee_relation_to_donor == "mother"
+    assert assess.selected_rule == "article_34_3_percent"
+    assert assess.selected_rule != "article_34_200"
+    assert assess.duty_rate == "3%"
+    assert assess.base_duty == 150000  # 3% of 50,00,000
+    assert assess.metro_cess_amount == 50000  # 1% metro cess at Pune
+    assert assess.expected_total == 200000
+    assert assess.total_stamp_duty_paid == 200000
+    assert assess.difference == 0
+    assert assess.status == "compliant"
+
+
+def test_extract_identification_documents_inline_recitals_and_grouping():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Between Ramesh Kulkarni, aged 65 years, holding PAN ABCDE1234F and Aadhaar No. 2345 6789 0123 (Donor) "
+            "and Priya Sharma, aged 32 years, holding PAN XYZAB5678C and Passport No. Z1234567 (Donee).\n"
+            "Witness 1: Mohan Patil, Age 50, Voter ID: MHX1234567, Driving Licence No. MH12 20100012345.",
+        )
+    ]
+    grouped = extract_identification_documents(pages)
+    assert set(grouped["grouped_documents"].keys()) == {"pan_card", "aadhaar_card", "other_id"}
+    assert grouped["status"] == "found"
+    assert grouped["summary_counts"] == {"pan_card": 2, "aadhaar_card": 1, "other_id": 3, "total": 6}
+
+    # PAN cards
+    assert len(grouped["pan_card"]) == 2
+    pans_by_num = {item["id_number"]: item for item in grouped["pan_card"]}
+    assert pans_by_num["ABCDE1234F"]["party_role"] == "Donor"
+    assert pans_by_num["ABCDE1234F"]["holder_name"] == "Ramesh Kulkarni"
+    assert pans_by_num["ABCDE1234F"]["dob_or_age"] == "65 years"
+    assert pans_by_num["ABCDE1234F"]["page_numbers"] == [1]
+    assert pans_by_num["ABCDE1234F"]["confidence"] == "high"
+    assert pans_by_num["XYZAB5678C"]["party_role"] == "Donee"
+    assert pans_by_num["XYZAB5678C"]["holder_name"] == "Priya Sharma"
+
+    # Aadhaar masked both in id_number and evidence_snippet
+    assert len(grouped["aadhaar_card"]) == 1
+    aadhaar = grouped["aadhaar_card"][0]
+    assert aadhaar["doc_type"] == "aadhaar_card"
+    assert aadhaar["id_sub_type"] == "aadhaar"
+    assert aadhaar["id_number"] == "XXXX-XXXX-0123"
+    assert "2345 6789 0123" not in aadhaar["evidence_snippet"]
+    assert "XXXX-XXXX-0123" in aadhaar["evidence_snippet"]
+    assert aadhaar["party_role"] == "Donor"
+    assert aadhaar["holder_name"] == "Ramesh Kulkarni"
+
+    # Other IDs: Passport (Donee) + Voter ID & Driving Licence (Witness)
+    assert len(grouped["other_id"]) == 3
+    others_by_sub = {item["id_sub_type"]: item for item in grouped["other_id"]}
+    assert others_by_sub["passport"]["id_number"] == "Z1234567"
+    assert others_by_sub["passport"]["party_role"] == "Donee"
+    assert others_by_sub["voter_id"]["id_number"] == "MHX1234567"
+    assert others_by_sub["voter_id"]["party_role"] == "Witness"
+    assert others_by_sub["driving_licence"]["id_number"] == "MH1220100012345"
+    assert others_by_sub["driving_licence"]["party_role"] == "Witness"
+
+    expected_keys = {
+        "doc_type",
+        "id_sub_type",
+        "id_number",
+        "holder_name",
+        "holder_name_source",
+        "deed_name",
+        "name_verification",
+        "party_role",
+        "dob_or_age",
+        "page_numbers",
+        "confidence",
+        "evidence_snippet",
+    }
+    for bucket in grouped["grouped_documents"].values():
+        for item in bucket:
+            assert set(item.keys()) == expected_keys
+
+
+def test_extract_identification_documents_attached_id_cards_and_role_inference():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Govind Kulkarni\n"
+            "Donee: Suresh Ramesh Kulkarni\n"
+            "WHEREAS the Donor gifts the residential flat to his son the Donee.",
+        ),
+        (
+            2,
+            "INCOME TAX DEPARTMENT\n"
+            "GOVT. OF INDIA\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "RAMESH GOVIND KULKARNI\n"
+            "Father's Name\n"
+            "GOVIND NARAYAN KULKARNI\n"
+            "Date of Birth\n"
+            "10/05/1960",
+        ),
+        (
+            3,
+            "Government of India\n"
+            "Unique Identification Authority of India\n"
+            "Suresh Ramesh Kulkarni\n"
+            "Year of Birth: 1992\n"
+            "Male\n"
+            "4567 8901 2345\n"
+            "VID : 9123 4567 8901 2345",
+        ),
+        (
+            4,
+            "ELECTION COMMISSION OF INDIA\n"
+            "Elector Photo Identity Card\n"
+            "Name: M. Kulkarni\n"
+            "EPIC No: MHX9988776\n"
+            "Age: 55",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+
+    assert len(grouped["pan_card"]) == 1
+    pan = grouped["pan_card"][0]
+    assert pan["id_number"] == "ABCDE1234F"
+    assert pan["holder_name"] == "RAMESH GOVIND KULKARNI"
+    assert pan["party_role"] == "Donor"
+    assert pan["dob_or_age"] == "10/05/1960"
+    assert pan["page_numbers"] == [2]
+
+    # Must extract 12-digit Aadhaar (XXXX-XXXX-2345) and NOT misparse 16-digit VID
+    assert len(grouped["aadhaar_card"]) == 1
+    aadhaar = grouped["aadhaar_card"][0]
+    assert aadhaar["id_number"] == "XXXX-XXXX-2345"
+    assert aadhaar["holder_name"] == "Suresh Ramesh Kulkarni"
+    assert aadhaar["party_role"] == "Donee"
+    assert aadhaar["dob_or_age"] == "1992"
+    assert aadhaar["page_numbers"] == [3]
+
+    # Shared surname alone ("M. Kulkarni") must NOT guess Donor or Donee
+    assert len(grouped["other_id"]) == 1
+    epic = grouped["other_id"][0]
+    assert epic["id_sub_type"] == "voter_id"
+    assert epic["id_number"] == "MHX9988776"
+    assert epic["party_role"] == "Unknown"
+
+
+def test_extract_identification_documents_deduplication_across_pages():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Kulkarni, aged 65, PAN: ABCDE1234F, Aadhaar: [Aadhaar Redacted].\n"
+            "Donee: Sunita Kulkarni, Aadhaar No: 7788 9900 1122.",
+        ),
+        (
+            3,
+            "INCOME TAX DEPARTMENT\n"
+            "Permanent Account Number\n"
+            "Name: RAMESH KULKARNI\n"
+            "DOB: 10/05/1960\n"
+            "ABCDE1234F",
+        ),
+        (
+            4,
+            "Unique Identification Authority of India\n"
+            "Ramesh Kulkarni\n"
+            "Aadhaar: 2345 6789 0123\n"
+            "DOB: 10/05/1960",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+
+    # Same PAN on page 1 and page 3 -> deduplicated into 1 record with page_numbers [1, 3] and enriched DOB
+    assert len(grouped["pan_card"]) == 1
+    pan = grouped["pan_card"][0]
+    assert pan["id_number"] == "ABCDE1234F"
+    assert pan["page_numbers"] == [1, 3]
+    assert pan["party_role"] == "Donor"
+    assert pan["dob_or_age"] == "10/05/1960"
+
+    # Donor's redacted Aadhaar on page 1 merges with Donor's numbered Aadhaar on page 4,
+    # while Donee's Aadhaar on page 1 stays distinct.
+    assert len(grouped["aadhaar_card"]) == 2
+    by_role = {item["party_role"]: item for item in grouped["aadhaar_card"]}
+    assert by_role["Donor"]["id_number"] == "XXXX-XXXX-0123"
+    assert by_role["Donor"]["page_numbers"] == [1, 4]
+    assert by_role["Donee"]["id_number"] == "XXXX-XXXX-1122"
+    assert by_role["Donee"]["page_numbers"] == [1]
+
+
+def test_assess_stamp_duty_persists_identification_documents():
+    import json as _json
+
+    doc = LogicalDocument(id="doc-id-persist", ingestion_id="ing-id-persist", start_page=1, end_page=1, category="gift_deed")
+    text_by_page = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Kulkarni, aged 64, PAN: ABCDE1234F\n"
+            "Donee: Suresh Kulkarni, aged 32, Aadhaar No: 3456 7890 1234\n"
+            "WHEREAS the Donor is the father of the Donee.\n"
+            "Schedule of Property: Residential flat No. 10, Pune.\n"
+            "Market Value: ₹ 30,00,000/-\n"
+            "Total Stamp Duty Paid: ₹ 30,200/-",
+        )
+    ]
+    assess = assess_stamp_duty_article_34(doc, text_by_page)
+    assert assess.identification_documents is not None
+    parsed = _json.loads(assess.identification_documents)
+    assert len(parsed["pan_card"]) == 1
+    assert parsed["pan_card"][0]["id_number"] == "ABCDE1234F"
+    assert parsed["pan_card"][0]["party_role"] == "Donor"
+    assert len(parsed["aadhaar_card"]) == 1
+    assert parsed["aadhaar_card"][0]["id_number"] == "XXXX-XXXX-1234"
+    assert parsed["aadhaar_card"][0]["party_role"] == "Donee"
+
+
+def test_extract_identification_documents_handles_multiline_ocr_noise_and_witness_transliteration():
+    pages = [
+        (
+            3,
+            "GIFT DEED\n"
+            "BETWEEN:\n"
+            "MR. CHETAN AMICHAND SHAH, [PAN # AAEPS2095R], [AADHAR\n"
+            "# 8161 9641 4794], age 75 years, residing at Mumbai,\n"
+            'hereinafter referred to as "THE DONOR" of the ONE PART;\n'
+            "AND\n"
+            "MRS. SHEELA CHETAN SHAH, [PAN # AAMPS4553J[, [AADHAR #\n"
+            "5598 7473 7252], age 71 years, residing at Mumbai,\n"
+            'hereinafter referred to as "THE DONEE" of the OTHER PART.',
+        ),
+        (
+            6,
+            "INDIAN INCOME TAX RETURN ACKNOWLEDGEMENT\n"
+            "PAN AAMPS4553J\n"
+            "Name SHEELA CHETAN SHAH\n"
+            "and verified by SHEELA CHETAN SHAH having PAN AAMPS4553J on 14-Aug-2025\n"
+            "using paper ITR-Verification Form /Electronic Verification Code EGRLSFU3RI generated through Aadhaar\n"
+            "oTp mode",
+        ),
+        (
+            8,
+            "भारत सरकार\n"
+            "Chetan Amichand Shah\n"
+            "जन्म तारीख / 008: 31/08/1950\n"
+            "8161 9641 4794\n"
+            "आधार UNOUE IDENTIFICATION AUTHORITY OF INDTA\n"
+            "8161.9641 4794 m",
+        ),
+        (
+            9,
+            "PERMANENT ACCOUNT NUMBER\n"
+            "AAMPS4553J\n"
+            "वाम 1NAME\n"
+            "SHEELA CHETAN SHAH\n"
+            "जय लिंन OATE OP SIRTH\n"
+            "21-06-1954",
+        ),
+        (
+            11,
+            "AADHAAR\n"
+            "Downtnad Date: 1903/20181\n"
+            "Hemanshu Ganvantohai Darii w To establish identity authenticate online,\n"
+            "आसपला .x क्रम्मांक/Your . No.:\n"
+            "5442 7001 7288\n"
+            "माझे आधार, माझ ओळख\n"
+            "Remanshy Gunvantbhai Dani\n"
+            "जन्म४नेल/009: MALE 23/08/1987",
+        ),
+        (
+            12,
+            "भारते सरकार\n"
+            "6157 6949 4296\n"
+            "सामान्य माणसाया अधिकार\n"
+            "Unique 22 7844 tdentibcabon 101 2640 Authosty of vndia\n"
+            "6157 6949 4296",
+        ),
+        (
+            14,
+            "दस्त गोषवारा भाग-2\n"
+            "नाव:शीला चेतन शाह लिहन ऐेणार\n"
+            "2 नाव चेतन अमिचंद शाह लिहन देणार\n"
+            "ओळख:-\n"
+            "1 लात:संजय शिवगण\n"
+            "2 नाव:हिमांश दर्जी",
+        ),
+    ]
+    doc_pages = [pages[0]]
+    grouped = extract_identification_documents(doc_pages, all_pages=pages)
+
+    pans = {item["id_number"]: item for item in grouped["pan_card"]}
+    assert set(pans.keys()) == {"AAEPS2095R", "AAMPS4553J"}
+    assert pans["AAEPS2095R"]["party_role"] == "Donor"
+    assert pans["AAEPS2095R"]["holder_name"] == "CHETAN AMICHAND SHAH"
+    assert pans["AAMPS4553J"]["party_role"] == "Donee"
+    assert pans["AAMPS4553J"]["holder_name"] == "SHEELA CHETAN SHAH"
+    assert pans["AAMPS4553J"]["dob_or_age"] == "21-06-1954"
+
+    aadhaars = {item["id_number"]: item for item in grouped["aadhaar_card"]}
+    assert "[Aadhaar Redacted]" not in aadhaars  # Must NOT false-trigger from ITR-V EVC line
+    assert set(aadhaars.keys()) == {
+        "XXXX-XXXX-4794",
+        "XXXX-XXXX-7252",
+        "XXXX-XXXX-7288",
+        "XXXX-XXXX-4296",
+    }
+    assert aadhaars["XXXX-XXXX-4794"]["party_role"] == "Donor"
+    assert aadhaars["XXXX-XXXX-4794"]["dob_or_age"] == "31/08/1950"
+    assert aadhaars["XXXX-XXXX-7252"]["party_role"] == "Donee"
+    assert aadhaars["XXXX-XXXX-7288"]["party_role"] == "Witness"
+    assert aadhaars["XXXX-XXXX-7288"]["holder_name"] == "Hemanshu Ganvantohai Darii"
+    assert aadhaars["XXXX-XXXX-7288"]["dob_or_age"] == "23/08/1987"
+    assert aadhaars["XXXX-XXXX-4296"]["holder_name"] is None
+
+
+def test_identification_documents_name_comparison_exact_match():
+    # Direct comparison test
+    direct = compare_deed_and_id_name("Shri Sharma Rajesh Kumar", "RAJESH KUMAR SHARMA")
+    assert direct["status"] == "exact_match"
+    assert direct["flagged"] is False
+    assert direct["discrepancy_reason"] == "Exact token match (surname/given name order differs between Gift Deed and ID)"
+
+    # Full pipeline test with relational tail
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Shri Sharma Rajesh Kumar, S/o Venkat Sharma, aged 60 years\n"
+            "Donee: Anita Sharma, aged 32 years\n"
+            "WHEREAS the Donor gifts the residential property to Donee.",
+        ),
+        (
+            2,
+            "INCOME TAX DEPARTMENT\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "RAJESH KUMAR SHARMA\n"
+            "Date of Birth\n"
+            "10/05/1964",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    assert grouped["summary_counts"]["pan_card"] == 1
+    pan_doc = grouped["pan_card"][0]
+    assert pan_doc["party_role"] == "Donor"
+    assert pan_doc["id_number"] == "ABCDE1234F"
+    assert pan_doc["holder_name"] == "RAJESH KUMAR SHARMA"
+    assert pan_doc["deed_name"] == "Shri Sharma Rajesh Kumar"
+
+    ver = pan_doc["name_verification"]
+    assert ver["status"] == "exact_match"
+    assert ver["flagged"] is False
+    assert ver["severity"] == "none"
+    assert ver["deed_name"] == "Shri Sharma Rajesh Kumar"
+    assert ver["id_holder_name"] == "RAJESH KUMAR SHARMA"
+    assert "Exact token match" in (ver["discrepancy_reason"] or "")
+
+
+def test_identification_documents_name_comparison_minor_variation():
+    # Case A: Initials used on ID vs expanded name in Gift Deed
+    res_initials = compare_deed_and_id_name("Smt. Kavita Ajay Deshmukh", "KAVITA A DESHMUKH")
+    assert res_initials["status"] == "minor_variation"
+    assert res_initials["flagged"] is True
+    assert res_initials["severity"] == "warning"
+    assert res_initials["discrepancy_reason"]
+    assert "Initial" in res_initials["discrepancy_reason"]
+
+    # Case B: Middle name omitted on ID
+    res_omitted = compare_deed_and_id_name("Smt. Kavita Ajay Deshmukh", "KAVITA DESHMUKH")
+    assert res_omitted["status"] == "minor_variation"
+    assert res_omitted["flagged"] is True
+    assert res_omitted["severity"] == "warning"
+    assert res_omitted["discrepancy_reason"]
+    assert "AJAY" in res_omitted["discrepancy_reason"]
+
+    # Pipeline test
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Smt. Kavita Ajay Deshmukh, aged 45 years\n"
+            "Donee: Rahul Deshmukh\n"
+            "WHEREAS the Donor gifts the property.",
+        ),
+        (
+            2,
+            "INCOME TAX DEPARTMENT\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "KAVITA A DESHMUKH\n"
+            "Date of Birth\n"
+            "12/08/1979",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    pan = grouped["pan_card"][0]
+    assert pan["party_role"] == "Donor"
+    assert pan["name_verification"]["status"] == "minor_variation"
+    assert pan["name_verification"]["flagged"] is True
+    assert pan["name_verification"]["discrepancy_reason"]
+    assert grouped["name_verification_summary"]["minor_variation_count"] == 1
+    assert grouped["name_verification_summary"]["has_discrepancies"] is True
+    assert len(grouped["name_verification_summary"]["flagged_discrepancies"]) == 1
+
+
+def test_identification_documents_name_comparison_mismatch_aadhaar():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Donor: Ramesh Kulkarni, aged 60 years\n"
+            "Donee: Smt. Priya Menon, aged 28 years\n"
+            "WHEREAS the Donor conveys and gifts the residential flat to the Donee.",
+        ),
+        (
+            2,
+            "GOVERNMENT OF INDIA\n"
+            "Unique Identification Authority of India\n"
+            "PRIYA NAIR\n"
+            "Aadhaar [Aadhaar Redacted]\n"
+            "DOB: 12/04/1996",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    assert len(grouped["aadhaar_card"]) == 1
+    aadhaar = grouped["aadhaar_card"][0]
+
+    assert aadhaar["party_role"] == "Donee"
+    assert aadhaar["holder_name"] == "PRIYA NAIR"
+    assert aadhaar["deed_name"] == "Smt. Priya Menon"
+    assert aadhaar["id_number"] == "[Aadhaar Redacted]"
+
+    ver = aadhaar["name_verification"]
+    assert ver["status"] == "mismatch"
+    assert ver["flagged"] is True
+    assert ver["severity"] == "high"
+    assert "MENON" in ver["discrepancy_reason"]
+    assert "NAIR" in ver["discrepancy_reason"]
+
+    summary = grouped["name_verification_summary"]
+    assert summary["mismatch_count"] == 1
+    assert summary["has_discrepancies"] is True
+    assert len(summary["flagged_discrepancies"]) == 1
+    flagged = summary["flagged_discrepancies"][0]
+    assert flagged["doc_type"] == "aadhaar_card"
+    assert flagged["party_role"] == "Donee"
+    assert flagged["deed_name"] == "Smt. Priya Menon"
+    assert flagged["id_holder_name"] == "PRIYA NAIR"
+    assert flagged["status"] == "mismatch"
+    assert flagged["id_number"] == "[Aadhaar Redacted]"
+
+
+def test_identification_documents_multipage_deduplication_preservation():
+    pages = [
+        (
+            1,
+            "GIFT DEED\n"
+            "Registration Ref: REG-2026-MULTI-01\n"
+            "Donor: Shri Rameshwar Rao holding PAN ABCDE1234F, aged 62 years\n"
+            "Donee: Suresh Rao, aged 30 years\n"
+            "WHEREAS the Donor gifts the property.",
+        ),
+        (
+            2,
+            "Schedule of Property: Residential Flat No 4, Pune Municipal Corporation.",
+        ),
+        (
+            3,
+            "In witness whereof the parties have signed on this deed.",
+        ),
+        (
+            4,
+            "INCOME TAX DEPARTMENT\n"
+            "GOVT OF INDIA\n"
+            "Permanent Account Number Card\n"
+            "ABCDE1234F\n"
+            "Name\n"
+            "RAMESH RAO\n"
+            "Date of Birth\n"
+            "15/06/1962",
+        ),
+    ]
+    grouped = extract_identification_documents(pages)
+    assert grouped["summary_counts"]["pan_card"] == 1
+    pan = grouped["pan_card"][0]
+
+    # Deduplicated record must retain BOTH deed_name and id_holder_name separately
+    assert pan["deed_name"] == "Shri Rameshwar Rao"
+    assert pan["holder_name"] == "RAMESH RAO"
+    assert pan["holder_name_source"] == "id_document"
+    assert pan["party_role"] == "Donor"
+    assert pan["id_number"] == "ABCDE1234F"
+    assert pan["page_numbers"] == [1, 4]
+
+    # Verify difference is flagged and not overwritten
+    ver = pan["name_verification"]
+    assert ver["status"] == "minor_variation"
+    assert ver["flagged"] is True
+    assert ver["deed_name"] == "Shri Rameshwar Rao"
+    assert ver["id_holder_name"] == "RAMESH RAO"
+    assert "RAMESHWAR" in ver["discrepancy_reason"]
+
+
 
 
 

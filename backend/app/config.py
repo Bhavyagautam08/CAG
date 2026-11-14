@@ -63,6 +63,10 @@ ARTICLE_34_NORMALIZED_ELIGIBLE_RELATIONSHIPS: frozenset[str] = frozenset({
     "parents_and_daughter",
     "parents_and_children",
     "parent_and_child",
+    "son_to_mother",
+    "son_to_father",
+    "daughter_to_mother",
+    "daughter_to_father",
 })
 
 # English, Hindi, and Marathi lexical mappings to normalized forms
@@ -115,6 +119,14 @@ ARTICLE_34_RELATIONSHIP_LEXICAL_MAPPINGS: dict[str, str] = {
     "parents to children": "parents_and_children",
     "parents and children": "parents_and_children",
     "parent and child": "parent_and_child",
+    "son to mother": "son_to_mother",
+    "son and mother": "son_to_mother",
+    "son to father": "son_to_father",
+    "son and father": "son_to_father",
+    "daughter to mother": "daughter_to_mother",
+    "daughter and mother": "daughter_to_mother",
+    "daughter to father": "daughter_to_father",
+    "daughter and father": "daughter_to_father",
 
     # Hindi lexical variants
     "पिता": "father",
@@ -163,6 +175,12 @@ ARTICLE_34_RELATIONSHIP_LEXICAL_MAPPINGS: dict[str, str] = {
     "माता-पिता व पुत्र": "parents_and_son",
     "माता-पिता और पुत्री": "parents_and_daughter",
     "माता-पिता से पुत्री": "parents_and_daughter",
+    "पुत्र और माता": "son_to_mother",
+    "पुत्र से माता": "son_to_mother",
+    "पुत्र और पिता": "son_to_father",
+    "पुत्र से पिता": "son_to_father",
+    "पुत्री और माता": "daughter_to_mother",
+    "पुत्री और पिता": "daughter_to_father",
     "मृत पुत्र की विधवा": "wife_of_deceased_son",
 
     # Marathi lexical variants
@@ -209,6 +227,14 @@ ARTICLE_34_RELATIONSHIP_LEXICAL_MAPPINGS: dict[str, str] = {
     "आई-वडील आणि मुलगी": "parents_and_daughter",
     "आई-वडील व मुलगी": "parents_and_daughter",
     "आई-वडील ते मुलगी": "parents_and_daughter",
+    "मुलगा आणि आई": "son_to_mother",
+    "मुलगा व आई": "son_to_mother",
+    "मुलगा ते आई": "son_to_mother",
+    "मुलगा आणि वडील": "son_to_father",
+    "मुलगा व वडील": "son_to_father",
+    "मुलगा ते वडील": "son_to_father",
+    "मुलगी आणि आई": "daughter_to_mother",
+    "मुलगी आणि वडील": "daughter_to_father",
     "मयत मुलाची विधवा": "wife_of_deceased_son",
     "दिवंगत पुत्राची पत्नी": "wife_of_deceased_son",
 }
