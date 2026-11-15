@@ -436,7 +436,10 @@ def detect_table_lines(image_source: Path | bytes) -> list[dict[str, int | float
             )
             if lines is None:
                 continue
-            for x1, y1, x2, y2 in lines[:, 0, :]:
+            # OpenCV normally returns ``(count, 1, 4)`` here, but some builds
+            # return ``(count, 4)``.  Normalise the segments so the detection
+            # pipeline is independent of that packaging detail.
+            for x1, y1, x2, y2 in lines.reshape(-1, 4):
                 dx = int(x2) - int(x1)
                 dy = int(y2) - int(y1)
                 length = (dx * dx + dy * dy) ** 0.5

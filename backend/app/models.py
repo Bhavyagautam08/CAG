@@ -141,6 +141,23 @@ class LogicalDocument(Base):
         uselist=False,
     )
 
+    @property
+    def pages(self) -> list["Page"]:
+        cached = getattr(self, "_pages_cache", None)
+        if cached is not None:
+            return cached
+        ing = getattr(self, "ingestion", None)
+        if ing and getattr(ing, "pages", None):
+            return sorted(
+                [p for p in ing.pages if self.start_page <= p.page_number <= self.end_page],
+                key=lambda p: p.page_number,
+            )
+        return []
+
+    @pages.setter
+    def pages(self, value: list["Page"]) -> None:
+        self._pages_cache = value
+
 
 class DocumentRelationship(Base):
     __tablename__ = "document_relationships"
@@ -308,6 +325,7 @@ class StampDutyAssessment(Base):
     effective_date: Mapped[str | None] = mapped_column(String(32), nullable=True, default="2017-05-16")
     calculation_components: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identification_documents: Mapped[str | None] = mapped_column(Text, nullable=True)
     market_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     base_duty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     metro_cess_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -338,6 +356,14 @@ class StampDutyAssessment(Base):
     )
 
     document: Mapped["LogicalDocument"] = sa_relationship(back_populates="stamp_duty_assessment")
+
+    @property
+    def extracted_id_documents_json(self) -> str | None:
+        return self.identification_documents
+
+    @extracted_id_documents_json.setter
+    def extracted_id_documents_json(self, value: str | None) -> None:
+        self.identification_documents = value
 
     @reconstructor
     def _init_on_load(self):

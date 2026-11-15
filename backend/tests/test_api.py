@@ -20,6 +20,7 @@ from backend.app.models import (
     Ingestion,
     LogicalDocument,
     Page,
+    StampDutyAssessment,
     ValidationFinding,
 )
 from backend.app.ocr import detect_table_lines
@@ -1121,5 +1122,572 @@ def test_stamp_duty_assessment_serialization_and_endpoint():
     assert "expected total stamp duty" in all_text
     assert "maharashtra stamp act, article 34" in all_text
     assert "mh-art34-2024.1" in all_text
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_identification_documents_api_persistence_and_serialization():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-ID-TEST-99\n"
+        "Donor: Ramesh Kulkarni, aged 64 years, PAN: ABCDE1234F\n"
+        "Donee: Suresh Kulkarni, aged 32 years, Aadhaar No: 3456 7890 1234\n"
+        "WHEREAS the Donor is the father of the Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune Municipal Corporation.\n"
+        "Market Value: ₹ 30,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 30,200/-"
+    )
+    page_2 = (
+        "INCOME TAX DEPARTMENT\n"
+        "Permanent Account Number Card\n"
+        "Name\n"
+        "RAMESH KULKARNI\n"
+        "ABCDE1234F\n"
+        "Date of Birth\n"
+        "10/05/1960"
+    )
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("gift_with_ids.pdf", pdf_bytes([page_1, page_2]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+    assert set(gift_doc["identification_documents"]["grouped_documents"].keys()) == {"pan_card", "aadhaar_card", "other_id"}
+    assert gift_doc["identification_documents"]["status"] == "found"
+    assert gift_doc["identification_documents"]["summary_counts"] == {"pan_card": 1, "aadhaar_card": 1, "other_id": 0, "total": 2}
+
+    details = client.get(f"/api/documents/{gift_doc['id']}").json()
+    id_docs = details["identification_documents"]
+    assert details["stamp_duty_assessment"]["identification_documents"] == id_docs
+    assert len(id_docs["pan_card"]) == 1
+    assert id_docs["pan_card"][0]["id_number"] == "ABCDE1234F"
+    assert id_docs["pan_card"][0]["party_role"] == "Donor"
+    assert id_docs["pan_card"][0]["page_numbers"] == [1, 2]
+    assert len(id_docs["aadhaar_card"]) == 1
+    assert id_docs["aadhaar_card"][0]["id_number"] == "XXXX-XXXX-1234"
+    assert id_docs["aadhaar_card"][0]["party_role"] == "Donee"
+
+    # Generate formatted PDF report and verify Extracted Identification Documents rendering
+    report = client.get(f"/api/ingestions/{ingestion_id}/report.pdf")
+    assert report.status_code == 200
+    assert report.content.startswith(b"%PDF-")
+
+    reader = PdfReader(io.BytesIO(report.content))
+    all_text = "\n".join(page.extract_text() or "" for page in reader.pages).lower()
+    assert "extracted identification documents" in all_text
+    assert "pan card details" in all_text
+    assert "aadhaar card details" in all_text
+    assert "other identification documents" in all_text
+    assert "abcde1234f" in all_text
+    assert "xxxx-xxxx-1234" in all_text
+    assert "no other identification documents detected" in all_text
+
+    # Verify the Extracted Identification Documents section itself masks raw Aadhaar digits
+    id_section_start = all_text.index("extracted identification documents")
+    id_section_end = all_text.index("complete extracted text", id_section_start)
+    id_section_text = all_text[id_section_start:id_section_end]
+    assert "xxxx-xxxx-1234" in id_section_text
+    assert "3456 7890 1234" not in id_section_text
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_formatted_pdf_report_wraps_long_id_evidence_and_renders_all_groups():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-ID-LONG-01\n"
+        "Donor: Ramesh Kulkarni, aged 64 years, PAN: ABCDE1234F\n"
+        "Donee: Suresh Kulkarni, aged 32 years, Voter ID: MHX1234567\n"
+        "WHEREAS the Donor is the father of the Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune Municipal Corporation.\n"
+        "Market Value: ₹ 30,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 30,200/-"
+    )
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("gift_long_id.pdf", pdf_bytes([page_1]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    # Inject a long holder name on the persisted ID record to verify wrapping cleanly across margins
+    # and confirm Confidence / Evidence commentary lines are omitted from ID cards in the PDF report
+    from backend.app.models import StampDutyAssessment
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+    long_tail = "LONG_HOLDER_END_MARKER_VERIFIED"
+    long_holder = (
+        "Rameshwaram Venkatasubramanian Kulkarni Alias Patwardhan "
+        + long_tail
+    )
+    with SessionLocal() as db:
+        assessment = db.query(StampDutyAssessment).filter_by(document_id=gift_doc["id"]).one()
+        payload = json.loads(assessment.identification_documents)
+        payload["pan_card"][0]["holder_name"] = long_holder
+        if "grouped_documents" in payload:
+            payload["grouped_documents"]["pan_card"][0]["holder_name"] = long_holder
+        assessment.identification_documents = json.dumps(payload)
+        db.commit()
+
+    report = client.get(f"/api/ingestions/{ingestion_id}/report.pdf")
+    assert report.status_code == 200
+    assert report.content.startswith(b"%PDF-")
+
+    reader = PdfReader(io.BytesIO(report.content))
+    all_text = "\n".join(page.extract_text() or "" for page in reader.pages).lower()
+    assert "extracted identification documents" in all_text
+    assert "pan card details" in all_text
+    assert "no aadhaar card details detected" in all_text
+    assert "other identification documents" in all_text
+    assert "abcde1234f" in all_text
+    assert "mhx1234567" in all_text
+    assert long_tail.lower() in all_text
+    id_section_start = all_text.index("extracted identification documents")
+    id_section_end = all_text.index("complete extracted text", id_section_start)
+    id_section_text = all_text[id_section_start:id_section_end]
+    assert "confidence:" not in id_section_text
+    assert "evidence:" not in id_section_text
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_end_to_end_synthetic_id_smoke_and_pdf():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-SMOKE-2026\n"
+        "Donor: Ramesh Kulkarni, aged 65 years, holding PAN ABCDE1234F\n"
+        "Donee: Suresh Kulkarni, aged 32 years, holding Aadhaar [Aadhaar Redacted]\n"
+        "WHEREAS the Donor gifts the residential flat to his son the Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune Municipal Corporation.\n"
+        "Market Value: ₹ 30,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 30,200/-"
+    )
+    page_2 = (
+        "INCOME TAX DEPARTMENT\n"
+        "GOVT. OF INDIA\n"
+        "Permanent Account Number Card\n"
+        "ABCDE1234F\n"
+        "Name\n"
+        "RAMESH KULKARNI\n"
+        "Date of Birth\n"
+        "10/05/1960"
+    )
+    page_3 = (
+        "Unique Identification Authority of India\n"
+        "Government of India\n"
+        "Suresh Kulkarni\n"
+        "Aadhaar No: 4567 8901 2345\n"
+        "Witness 1: Mohan Patil, Voter ID: MHX7654321"
+    )
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("synthetic_smoke.pdf", pdf_bytes([page_1, page_2, page_3]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+    details = client.get(f"/api/documents/{gift_doc['id']}").json()
+    id_docs = details["identification_documents"]
+
+    assert id_docs["status"] == "found"
+    assert id_docs["summary_counts"] == {"pan_card": 1, "aadhaar_card": 1, "other_id": 1, "total": 3}
+
+    pan_items = id_docs["grouped_documents"]["pan_card"]
+    assert len(pan_items) == 1
+    assert pan_items[0]["id_number"] == "ABCDE1234F"
+    assert pan_items[0]["party_role"] == "Donor"
+    assert pan_items[0]["page_numbers"] == [1, 2]
+
+    aadhaar_items = id_docs["grouped_documents"]["aadhaar_card"]
+    assert len(aadhaar_items) == 1
+    assert aadhaar_items[0]["party_role"] == "Donee"
+    assert aadhaar_items[0]["id_number"] == "XXXX-XXXX-2345"
+    assert "4567 8901 2345" not in aadhaar_items[0]["evidence_snippet"]
+
+    other_items = id_docs["grouped_documents"]["other_id"]
+    assert len(other_items) == 1
+    assert other_items[0]["party_role"] == "Witness"
+    assert other_items[0]["id_number"] == "MHX7654321"
+
+    report = client.get(f"/api/ingestions/{ingestion_id}/report.pdf")
+    assert report.status_code == 200
+    assert report.content.startswith(b"%PDF-")
+
+    reader = PdfReader(io.BytesIO(report.content))
+    pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages).lower()
+    assert "extracted identification documents" in pdf_text
+    assert "pan card" in pdf_text
+    assert "aadhaar card" in pdf_text
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_identification_documents_legacy_null_fallback_in_api():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-LEGACY-01\n"
+        "Donor: Ramesh Kulkarni\n"
+        "Donee: Suresh Kulkarni\n"
+        "WHEREAS the Donor is the father of the Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune Municipal Corporation.\n"
+        "Market Value: ₹ 25,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 25,200/-"
+    )
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("legacy_null_id.pdf", pdf_bytes([page_1]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    wait_for_ingestion(ingestion_id)
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+
+    # Simulate legacy DB row where identification_documents column is None
+    from backend.app.models import StampDutyAssessment
+
+    with SessionLocal() as db:
+        assessment = db.query(StampDutyAssessment).filter_by(document_id=gift_doc["id"]).one()
+        assessment.identification_documents = None
+        db.commit()
+
+    detail_resp = client.get(f"/api/documents/{gift_doc['id']}")
+    assert detail_resp.status_code == 200
+    details = detail_resp.json()
+    expected_empty = {
+        "extractor_version": 3,
+        "status": "not_found",
+        "summary_counts": {"pan_card": 0, "aadhaar_card": 0, "other_id": 0, "total": 0},
+        "grouped_documents": {"pan_card": [], "aadhaar_card": [], "other_id": []},
+        "pan_card": [],
+        "aadhaar_card": [],
+        "other_id": [],
+        "deed_parties": [
+            {
+                "party_role": "Donor",
+                "deed_name": "Ramesh Kulkarni",
+                "normalized_deed_name": "Ramesh Kulkarni",
+                "page_number": 1,
+            },
+            {
+                "party_role": "Donee",
+                "deed_name": "Suresh Kulkarni",
+                "normalized_deed_name": "Suresh Kulkarni",
+                "page_number": 1,
+            },
+        ],
+        "name_verification_summary": {
+            "total_evaluated": 0,
+            "exact_match_count": 0,
+            "minor_variation_count": 0,
+            "mismatch_count": 0,
+            "unverified_count": 0,
+            "has_discrepancies": False,
+            "flagged_discrepancies": [],
+        },
+    }
+    assert details["identification_documents"] == expected_empty
+    assert details["stamp_duty_assessment"]["identification_documents"] == expected_empty
+
+    # Also confirm PATCH assessment recalculation validates StampDutyAssessmentResponse cleanly on legacy Null
+    patch_resp = client.patch(
+        f"/api/documents/{gift_doc['id']}/stamp-duty-assessment",
+        json={"reviewer_notes": "Legacy record check"},
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["identification_documents"] == expected_empty
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_identification_documents_auto_recomputes_when_extractor_version_outdated():
+    page_1 = (
+        "GIFT DEED\n"
+        "BETWEEN:\n"
+        "MR. CHETAN AMICHAND SHAH, [PAN # AAEPS2095R], [AADHAR\n"
+        "# 8161 9641 4794], age 75 years,\n"
+        'hereinafter referred to as "THE DONOR";\n'
+        "AND\n"
+        "MRS. SHEELA CHETAN SHAH, [PAN # AAMPS4553J[, [AADHAR #\n"
+        "5598 7473 7252], age 71 years,\n"
+        'hereinafter referred to as "THE DONEE".\n'
+        "WHEREAS Donor gifts the flat to his wife Donee.\n"
+        "Schedule of Property: Flat 19A, Mumbai Municipal Corporation.\n"
+        "Market Value: Rs. 50,00,000/-\n"
+        "Total Stamp Duty Paid: Rs. 200/-"
+    )
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("stale_id_recompute.pdf", pdf_bytes([page_1]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+
+    from backend.app.models import StampDutyAssessment
+    from backend.app.processing import ID_EXTRACTOR_VERSION
+
+    # Simulate an older DB record from an outdated extractor_version
+    stale_payload = {
+        "extractor_version": "outdated-v0",
+        "status": "not_found",
+        "summary_counts": {"pan_card": 0, "aadhaar_card": 0, "other_id": 0, "total": 0},
+        "grouped_documents": {"pan_card": [], "aadhaar_card": [], "other_id": []},
+        "pan_card": [],
+        "aadhaar_card": [],
+        "other_id": [],
+    }
+    with SessionLocal() as db:
+        assessment = db.query(StampDutyAssessment).filter_by(document_id=gift_doc["id"]).one()
+        assessment.identification_documents = json.dumps(stale_payload)
+        db.commit()
+
+    detail_resp = client.get(f"/api/documents/{gift_doc['id']}")
+    assert detail_resp.status_code == 200
+    id_docs = detail_resp.json()["identification_documents"]
+    assert id_docs["status"] == "found"
+    assert id_docs["summary_counts"] == {"pan_card": 2, "aadhaar_card": 2, "other_id": 0, "total": 4}
+    assert {p["id_number"]: p["party_role"] for p in id_docs["pan_card"]} == {
+        "AAEPS2095R": "Donor",
+        "AAMPS4553J": "Donee",
+    }
+
+    with SessionLocal() as db:
+        refreshed = db.query(StampDutyAssessment).filter_by(document_id=gift_doc["id"]).one()
+        persisted = json.loads(refreshed.identification_documents)
+        assert persisted["extractor_version"] == ID_EXTRACTOR_VERSION
+        assert "name_verification_summary" in persisted
+        assert "deed_parties" in persisted
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_resolve_identification_documents_endpoints_and_fallback():
+    from backend.app.main import _resolve_identification_documents
+    from backend.app.models import LogicalDocument, StampDutyAssessment
+
+    page_1 = (
+        "GIFT DEED\n"
+        "This Deed of Gift is made between:\n"
+        "MR. RAJESH KUMAR SHARMA, PAN: ABCDE1234F, hereinafter called the DONOR;\n"
+        "AND\n"
+        "MR. SURESH RAJESH SHARMA, Aadhaar No: 9876 5432 1098, hereinafter called the DONEE.\n"
+        "WHEREAS Donor gifts property to Donee.\n"
+        "Schedule of Property: Flat 5B, Pune.\n"
+        "Market Value: Rs. 40,00,000/-\n"
+        "Total Stamp Duty Paid: Rs. 200/-"
+    )
+    page_2 = (
+        "INCOME TAX DEPARTMENT\n"
+        "PERMANENT ACCOUNT NUMBER CARD\n"
+        "Name\n"
+        "R K SHARMA\n"
+        "Father's Name\n"
+        "RAM SHARMA\n"
+        "ABCDE1234F\n"
+        "DOB: 12/08/1970"
+    )
+
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("resolve_test.pdf", pdf_bytes([page_1, page_2]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+
+    # Test GET /api/documents/{id}/stamp-duty
+    resp = client.get(f"/api/documents/{gift_doc['id']}/stamp-duty")
+    assert resp.status_code == 200
+    duty_data = resp.json()
+    id_docs = duty_data["identification_documents"]
+
+    assert id_docs["extractor_version"] == 3
+    assert len(id_docs["deed_parties"]) >= 2
+    assert id_docs["name_verification_summary"]["total_evaluated"] >= 1
+
+    pan_cards = id_docs["grouped_documents"]["pan_card"]
+    assert len(pan_cards) == 1
+    donor_pan = pan_cards[0]
+    assert donor_pan["id_number"] == "ABCDE1234F"
+    assert donor_pan["holder_name"] == "R K SHARMA"
+    assert donor_pan["deed_name"] in ("RAJESH KUMAR SHARMA", "MR. RAJESH KUMAR SHARMA")
+
+    # Name verification detail structure
+    ver = donor_pan["name_verification"]
+    assert ver["status"] == "minor_variation"
+    assert ver["flagged"] is True
+    assert ver["severity"] == "warning"
+    assert ver["id_holder_name"] == "R K SHARMA"
+    assert "Initial" in ver["discrepancy_reason"]
+
+    # Test GET /api/documents/{id}/report.pdf
+    pdf_resp = client.get(f"/api/documents/{gift_doc['id']}/report.pdf")
+    assert pdf_resp.status_code == 200
+    assert "application/pdf" in pdf_resp.headers["content-type"]
+
+    # Test _resolve_identification_documents on document without pages (fallback safe default)
+    with SessionLocal() as db:
+        empty_doc = LogicalDocument(
+            ingestion_id="nonexistent-ingestion",
+            start_page=1,
+            end_page=1,
+            category="gift_deed",
+        )
+        empty_assessment = StampDutyAssessment(
+            document=empty_doc,
+        )
+        fallback = _resolve_identification_documents(db, empty_doc, empty_assessment)
+        assert fallback["status"] == "not_found"
+        assert fallback["summary_counts"]["total"] == 0
+        assert fallback["grouped_documents"]["pan_card"] == []
+        assert fallback["name_verification_summary"]["total_evaluated"] == 0
+        assert fallback["name_verification_summary"]["has_discrepancies"] is False
+        assert fallback["extractor_version"] == 3
+
+        # Test extracted_id_documents_json property on StampDutyAssessment
+        assert empty_assessment.extracted_id_documents_json == empty_assessment.identification_documents
+        empty_assessment.extracted_id_documents_json = '{"test": 123}'
+        assert empty_assessment.identification_documents == '{"test": 123}'
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_api_stamp_duty_auto_recompute_when_extractor_version_outdated():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-TEST-RECOMP-01\n"
+        "Donor: Ramesh Kulkarni, aged 64 years, PAN: ABCDE1234F\n"
+        "Donee: Suresh Kulkarni, aged 32 years\n"
+        "WHEREAS Donor gifts residential property to Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune.\n"
+        "Market Value: ₹ 30,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 30,200/-"
+    )
+
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("recomp_test.pdf", pdf_bytes([page_1]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+    doc_id = gift_doc["id"]
+
+    # Manually simulate an existing legacy DB row with extractor_version < 3
+    with SessionLocal() as db:
+        ass = db.query(StampDutyAssessment).filter_by(document_id=doc_id).one()
+        ass.identification_documents = json.dumps(
+            {
+                "extractor_version": 2,
+                "status": "found",
+                "pan_card": [{"doc_type": "pan_card", "id_number": "ABCDE1234F", "holder_name": "OLD LEGACY NAME"}],
+            }
+        )
+        db.commit()
+
+    # Call GET /api/documents/{id}/stamp-duty: must auto-recompute to extractor_version 3
+    resp = client.get(f"/api/documents/{doc_id}/stamp-duty")
+    assert resp.status_code == 200
+    duty_data = resp.json()
+    id_docs = duty_data["identification_documents"]
+
+    assert id_docs["extractor_version"] == 3
+    assert "name_verification_summary" in id_docs
+    assert id_docs["name_verification_summary"]["total_evaluated"] >= 1
+    assert len(id_docs["grouped_documents"]["pan_card"]) >= 1
+
+    pan_item = id_docs["grouped_documents"]["pan_card"][0]
+    assert pan_item["id_number"] == "ABCDE1234F"
+    assert "name_verification" in pan_item
+    assert pan_item["name_verification"]["status"] in ("exact_match", "unverified", "minor_variation")
+
+    # Verify that database row was backfilled and persisted permanently
+    with SessionLocal() as db:
+        ass = db.query(StampDutyAssessment).filter_by(document_id=doc_id).one()
+        persisted = json.loads(ass.identification_documents)
+        assert persisted.get("extractor_version") == 3
+        assert "name_verification_summary" in persisted
+
+    client.delete(f"/api/ingestions/{ingestion_id}")
+
+
+def test_api_document_pdf_report_renders_flagged_name_discrepancies():
+    page_1 = (
+        "GIFT DEED\n"
+        "Registration Ref: REG-TEST-DISC-01\n"
+        "Donor: Smt. Kavita Ajay Deshmukh, aged 45 years, holding PAN ABCDE1234F\n"
+        "Donee: Rahul Deshmukh, aged 22 years\n"
+        "WHEREAS Donor gifts the flat to Donee.\n"
+        "Schedule of Property: Residential Flat No 10, Pune.\n"
+        "Market Value: ₹ 30,00,000/-\n"
+        "Total Stamp Duty Paid: ₹ 30,200/-"
+    )
+    page_2 = (
+        "INCOME TAX DEPARTMENT\n"
+        "PERMANENT ACCOUNT NUMBER CARD\n"
+        "ABCDE1234F\n"
+        "Name\n"
+        "KAVITA A DESHMUKH\n"
+        "Date of Birth\n"
+        "12/08/1979"
+    )
+
+    uploaded = client.post(
+        "/api/ingestions",
+        files={"file": ("disc_test.pdf", pdf_bytes([page_1, page_2]), "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    ingestion_id = uploaded.json()["id"]
+    state = wait_for_ingestion(ingestion_id)
+    assert state["status"] in {"completed", "completed_with_warnings"}
+
+    documents = client.get("/api/documents").json()["items"]
+    gift_doc = next(d for d in documents if d["ingestion_id"] == ingestion_id and d["category"] == "gift_deed")
+    doc_id = gift_doc["id"]
+
+    # Verify GET /api/documents/{id}/report.pdf
+    doc_report = client.get(f"/api/documents/{doc_id}/report.pdf")
+    assert doc_report.status_code == 200
+    assert doc_report.content.startswith(b"%PDF-")
+
+    reader = PdfReader(io.BytesIO(doc_report.content))
+    all_text = "\n".join(p.extract_text() or "" for p in reader.pages).lower()
+    assert "extracted identification documents" in all_text
+    assert "name verification summary" in all_text
+    assert "flagged name discrepancies" in all_text
+    assert "kavita a deshmukh" in all_text
+    assert "kavita ajay deshmukh" in all_text
+    assert "minor variation" in all_text
+
+    # Also verify GET /api/ingestions/{id}/report.pdf
+    ing_report = client.get(f"/api/ingestions/{ingestion_id}/report.pdf")
+    assert ing_report.status_code == 200
+    assert ing_report.content.startswith(b"%PDF-")
 
     client.delete(f"/api/ingestions/{ingestion_id}")
